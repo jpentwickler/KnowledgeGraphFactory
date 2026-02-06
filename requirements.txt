@@ -1,0 +1,19 @@
+# Core dependencies
+anthropic>=0.40.0
+python-dotenv>=1.0.0
+
+# MCP server
+fastmcp<3
+
+# Neo4j (for Stage 6)
+neo4j>=5.0.0
+
+# Optional: Neo4j GraphRAG for entity extraction (Stage 6)
+# neo4j-graphrag>=0.1.0
+
+# Optional: Fuzzy string matching for entity resolution (Stage 6)
+# rapidfuzz>=3.0.0
+
+# Development
+pytest>=7.0.0
+pytest-asyncio>=0.21.0

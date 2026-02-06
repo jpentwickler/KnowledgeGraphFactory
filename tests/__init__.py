@@ -1,0 +1,1 @@
+"""KG-Factory test suite."""

@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "kg-factory": {
+      "command": "python",
+      "args": [
+        "C:\\Users\\jprob\\Documents\\Personal\\VisualStudio\\KnowledgeGraphFactory\\mcp_server\\server.py"
+      ]
+    }
+  }
+}

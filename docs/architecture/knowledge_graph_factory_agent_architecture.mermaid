@@ -1,0 +1,57 @@
+flowchart TB
+    KGA[Knowledge Graph Agent]
+    
+    SDA[Structured Data Agent]
+    UDA[Unstructured Data Agent]
+    GRA[GraphRAG Agent]
+    
+    KGA --> SDA
+    KGA --> UDA
+    KGA --> GRA
+
+    S_L4[User Intent Agent]
+    S_L5[File Suggestion Agent]
+    S_L6[Schema Proposal Agent]
+    
+    SDA --> S_L4
+    SDA --> S_L5
+    SDA --> S_L6
+
+    U_L4[User Intent Agent]
+    U_L5[File Suggestion Agent]
+    U_L7a[NER Extraction Agent]
+    U_L7b[Fact Extraction Agent]
+    
+    UDA --> U_L4
+    UDA --> U_L5
+    UDA --> U_L7a
+    UDA --> U_L7b
+
+    KG[(Knowledge Graph)]
+    GRA --> KG
+
+    GCP[Graph Construction Plan]
+    KEP[Knowledge Extraction Plan]
+    
+    S_L6 --> GCP
+    U_L7b --> KEP
+
+    L8[Knowledge Graph Construction Tool]
+    
+    GCP --> L8
+    KEP --> L8
+    L8 --> KG
+
+    classDef orchestrator fill:#f97316,stroke:#c2410c,color:#fff
+    classDef mainAgent fill:#3b82f6,stroke:#1d4ed8,color:#fff
+    classDef subAgent fill:#fbbf24,stroke:#d97706,color:#000
+    classDef plan fill:#22c55e,stroke:#15803d,color:#fff
+    classDef tool fill:#dc2626,stroke:#991b1b,color:#fff
+    classDef db fill:#22c55e,stroke:#15803d,color:#fff
+
+    class KGA orchestrator
+    class SDA,UDA,GRA mainAgent
+    class S_L4,S_L5,S_L6,U_L4,U_L5,U_L7a,U_L7b subAgent
+    class GCP,KEP plan
+    class L8 tool
+    class KG db

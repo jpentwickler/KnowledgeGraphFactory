@@ -1,0 +1,6 @@
+{
+  "enabledMcpjsonServers": [
+    "kg-factory"
+  ],
+  "enableAllProjectMcpServers": true
+}
