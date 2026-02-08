@@ -17,7 +17,7 @@ load_dotenv(os.path.join(_root_dir, ".env"))
 
 from fastmcp import FastMCP
 
-from agents import UserIntentAgent, FileSuggestionAgent
+from agents import UserIntentAgent, FileSuggestionAgent, SchemaProposalCoordinator
 from core import load_state, save_state
 
 
@@ -62,6 +62,7 @@ STATE_FILE = os.path.join(
 _CONVERSATION_KEYS = [
     "_user_intent_conversation",
     "_file_suggestion_conversation",
+    "_schema_proposal_conversation",
     "_conversation_history",  # legacy (US002 backward compat)
 ]
 
@@ -238,6 +239,58 @@ def kg_file_suggestion(message: str) -> dict:
     return {
         "agent_response": response,
         "status": status
+    }
+
+
+@mcp.tool
+def kg_schema_proposal(message: str) -> dict:
+    """Send a message to the Schema Proposal Coordinator.
+
+    Pass the user's message exactly as they wrote it. Do NOT add context,
+    file contents, or analysis -- the agent will ask its own questions.
+
+    This is a multi-turn conversation. Call this tool once per user message.
+    Stages 1 (User Intent) and 2 (File Suggestion) must be completed first.
+
+    Args:
+        message: The user's message, passed through exactly as written.
+
+    Returns:
+        Dictionary with agent response and current status.
+    """
+    state, conversation = load_session("_schema_proposal_conversation")
+
+    coordinator = SchemaProposalCoordinator()
+    response, state, conversation = coordinator.run(message, state, conversation)
+
+    save_session(state, conversation, "_schema_proposal_conversation")
+
+    # Build status info
+    status = {
+        "has_proposed_construction_plan": "proposed_construction_plan" in state,
+        "has_approved_construction_plan": "approved_construction_plan" in state,
+    }
+
+    if "proposed_construction_plan" in state:
+        plan = state["proposed_construction_plan"]
+        status["proposed_plan_summary"] = {
+            "node_count": sum(
+                1 for v in plan.values()
+                if v.get("construction_type") == "node"
+            ),
+            "relationship_count": sum(
+                1 for v in plan.values()
+                if v.get("construction_type") == "relationship"
+            ),
+            "labels": list(plan.keys()),
+        }
+
+    if "approved_construction_plan" in state:
+        status["approved_construction_plan"] = state["approved_construction_plan"]
+
+    return {
+        "agent_response": response,
+        "status": status,
     }
 
 

@@ -22,6 +22,29 @@ from tools.file_tools import (
     handle_approve_proposed_files,
 )
 
+from tools.schema_tools import (
+    TOOL_GET_APPROVED_FILES,
+    TOOL_SEARCH_FILE,
+    TOOL_PROPOSE_NODE_CONSTRUCTION,
+    TOOL_PROPOSE_RELATIONSHIP_CONSTRUCTION,
+    TOOL_REMOVE_NODE_CONSTRUCTION,
+    TOOL_REMOVE_RELATIONSHIP_CONSTRUCTION,
+    TOOL_GET_PROPOSED_CONSTRUCTION_PLAN,
+    TOOL_APPROVE_PROPOSED_CONSTRUCTION_PLAN,
+    TOOL_SUBMIT_REVIEW,
+    TOOL_RUN_REFINEMENT_LOOP,
+    handle_get_approved_files,
+    handle_search_file,
+    handle_propose_node_construction,
+    handle_propose_relationship_construction,
+    handle_remove_node_construction,
+    handle_remove_relationship_construction,
+    handle_get_proposed_construction_plan,
+    handle_approve_proposed_construction_plan,
+    handle_submit_review,
+    handle_run_refinement_loop,
+)
+
 __all__ = [
     # Intent tools (Stage 1)
     "TOOL_SET_PROPOSED_GOAL",
@@ -41,4 +64,25 @@ __all__ = [
     "handle_sample_file",
     "handle_set_proposed_files",
     "handle_approve_proposed_files",
+    # Schema tools (Stage 3)
+    "TOOL_GET_APPROVED_FILES",
+    "TOOL_SEARCH_FILE",
+    "TOOL_PROPOSE_NODE_CONSTRUCTION",
+    "TOOL_PROPOSE_RELATIONSHIP_CONSTRUCTION",
+    "TOOL_REMOVE_NODE_CONSTRUCTION",
+    "TOOL_REMOVE_RELATIONSHIP_CONSTRUCTION",
+    "TOOL_GET_PROPOSED_CONSTRUCTION_PLAN",
+    "TOOL_APPROVE_PROPOSED_CONSTRUCTION_PLAN",
+    "TOOL_SUBMIT_REVIEW",
+    "TOOL_RUN_REFINEMENT_LOOP",
+    "handle_get_approved_files",
+    "handle_search_file",
+    "handle_propose_node_construction",
+    "handle_propose_relationship_construction",
+    "handle_remove_node_construction",
+    "handle_remove_relationship_construction",
+    "handle_get_proposed_construction_plan",
+    "handle_approve_proposed_construction_plan",
+    "handle_submit_review",
+    "handle_run_refinement_loop",
 ]

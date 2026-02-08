@@ -1,38 +1,317 @@
-# Stage 3: Schema Proposal Agent
+# Stage 3: Schema Proposal — Critic Pattern
 
 ## Purpose
 
-Design the graph schema (node types, relationship types) based on the approved files.
-This is the most complex stage, involving iterative refinement.
+Design the graph schema (node types, relationship types) based on approved files.
+This stage uses a **multi-agent critic pattern** with automated refinement, faithfully
+reproducing the Google ADK LoopAgent design in pure Python + Anthropic API.
 
-## Complexity Note
+## Architecture
 
-In the Google ADK training, this stage uses a **LoopAgent** pattern with three sub-agents:
-1. Schema Proposal Agent - proposes schema
-2. Schema Critic Agent - validates proposal
-3. Coordinator - decides when to stop iterating
+Four components organized in a hierarchy:
 
-**For our pure Python implementation, we have two options:**
+```
+USER (via MCP / interactive test)
+  |
+  v
+SchemaProposalCoordinator          agents/schema_coordinator.py
+  |  Tools: run_refinement_loop,
+  |         get_proposed_construction_plan,
+  |         approve_proposed_construction_plan
+  |
+  +---> run_refinement_loop()       pipelines/schema_loop.py
+  |       |
+  |       +---> SchemaProposalAgent  agents/schema_proposal.py
+  |       |       (proposes nodes & relationships using 9 tools)
+  |       |       (receives {feedback} injected into system prompt)
+  |       |
+  |       +---> SchemaCriticAgent    agents/schema_critic.py
+  |       |       (validates with 5 read-only tools + submit_review)
+  |       |       (calls submit_review with verdict "valid" or "retry")
+  |       |
+  |       +---> check_status         (if "valid" -> stop, else loop)
+  |             (max 2 iterations)
+  |
+  +---> state["approved_construction_plan"]
+```
 
-### Option A: Human-as-Critic (Recommended for first implementation)
-- Single agent proposes schema
-- Human reviews and provides feedback
-- Agent iterates based on feedback
-- Simpler to implement, more control
+### Component 1: Schema Proposal Agent
 
-### Option B: Automated Critic Loop (Advanced)
-- Proposal agent proposes
-- Critic agent validates
-- Loop until valid or max iterations
-- More autonomous, less human oversight
+The inner agent that analyzes files and builds the construction plan. Receives critic
+feedback injected into its system prompt via `{feedback}` placeholder. Uses a **fresh
+conversation** each iteration (feedback comes through system prompt, not conversation history).
 
-**This spec covers Option A. Option B is documented in `docs/03b_schema_loop.md`.**
+**System prompt** (from original Neo4j/Google ADK course):
+
+```
+You are an expert at knowledge graph modeling with property graphs. Propose an appropriate
+schema by specifying construction rules which transform approved files into nodes or
+relationships. The resulting schema should describe a knowledge graph based on the user goal.
+
+Consider feedback if it is available:
+<feedback>
+{feedback}
+</feedback>
+
+HINTS FOR NODE VS RELATIONSHIP DETECTION:
+
+Every file in the approved files list will become either a node or a relationship.
+Determining whether a file likely represents a node or a relationship is based
+on a hint from the filename (is it a single thing or two things) and the
+identifiers found within the file.
+
+Because unique identifiers are so important for determining the structure of the graph,
+always verify the uniqueness of suspected unique identifiers using the 'search_file' tool.
+
+General guidance for identifying a node or a relationship:
+- If the file name is singular and has only 1 unique identifier it is likely a node
+- If the file name is a combination of two things, it is likely a full relationship
+- If the file name sounds like a node, but there are multiple unique identifiers,
+  that is likely a node with reference relationships
+
+Design rules for nodes:
+- Nodes will have unique identifiers.
+- Nodes _may_ have identifiers that are used as reference relationships.
+
+Design rules for relationships:
+- Relationships appear in two ways: full relationships and reference relationships.
+
+Full relationships:
+- Appear in dedicated relationship files, often having a filename that references
+  two entities
+- Typically have references to a source and destination node
+- _Do not have_ unique identifiers, but instead have references to the primary
+  keys of the source and destination nodes
+- The absence of a single, unique identifier is a strong indicator that a file
+  is a full relationship
+
+Reference relationships:
+- Appear as foreign key references in node files
+- Foreign key column names often hint at the destination node and relationship type
+- May be hierarchical container relationships (parent-child, "has", "contains")
+- May be peer relationships (self-reference, "knows", "see also")
+
+The resulting schema should be a connected graph, with no isolated components.
+
+CHAIN OF THOUGHT DIRECTIONS:
+
+Prepare for the task:
+- get the user goal using the 'get_approved_user_goal' tool
+- get the list of approved files using the 'get_approved_files' tool
+- get the current construction plan using the 'get_proposed_construction_plan' tool
+
+Think carefully, using tools to perform actions:
+1. For each approved file, consider whether it represents a node or relationship.
+   Check the content for potential unique identifiers using the 'sample_file' tool.
+2. For each identifier, verify that it is unique by using the 'search_file' tool.
+3. Use the node vs relationship guidance for deciding file type.
+4. For a node file, propose a node construction using 'propose_node_construction'.
+5. If the node contains a reference relationship, use 'propose_relationship_construction'.
+6. For a relationship file, use 'propose_relationship_construction'.
+7. If you need to remove a construction, use 'remove_node_construction' or
+   'remove_relationship_construction'.
+8. When done, use 'get_proposed_construction_plan' to present the plan.
+```
+
+**Tools (9):** get_approved_user_goal, get_approved_files, get_proposed_construction_plan,
+sample_file, search_file, propose_node_construction, propose_relationship_construction,
+remove_node_construction, remove_relationship_construction
+
+**No approval tool** — only the coordinator can approve.
+
+### Component 2: Schema Critic Agent
+
+Validates the proposed schema with read-only tools plus a structured `submit_review` tool.
+The verdict and problems are written to state by the tool, avoiding fragile text parsing.
+The critic's full text response is also stored as `state["feedback"]` by the refinement
+loop for injection into the proposal agent's next iteration.
+
+**System prompt** (adapted from original course, updated for structured verdict):
+
+```
+You are an expert at knowledge graph modeling with property graphs.
+Criticize the proposed schema for relevance to the user goal and approved files.
+
+VALIDATION RULES:
+
+- Are unique identifiers actually unique? Use 'search_file' to validate.
+  Composite identifiers are not acceptable.
+- Could any nodes be relationships instead? Double-check that unique identifiers
+  are unique and not references to other nodes.
+- Can you manually trace through the source data to find the necessary information
+  for answering a hypothetical question?
+- Is every node in the schema connected? What relationships could be missing?
+  Every node should connect to at least one other node.
+- Are hierarchical container relationships missing?
+- Are any relationships redundant? A relationship between two nodes is redundant
+  if it is semantically equivalent to or the inverse of another relationship.
+
+CHAIN OF THOUGHT DIRECTIONS:
+
+Prepare for the task:
+- get the user goal using the 'get_approved_user_goal' tool
+- get the list of approved files using the 'get_approved_files' tool
+- get the construction plan using the 'get_proposed_construction_plan' tool
+- use the 'sample_file' and 'search_file' tools to validate the schema design
+
+Think carefully:
+1. Analyze each construction rule in the proposed construction plan.
+2. Use tools to validate the construction rules for relevance and correctness.
+3. When you have completed your analysis, you MUST call the 'submit_review' tool:
+   - If the schema is correct, call submit_review with verdict "valid" and an empty
+     problems list.
+   - If the schema has problems, call submit_review with verdict "retry" and a list
+     of specific problems to fix.
+```
+
+**Tools (6):** get_approved_user_goal, get_approved_files,
+get_proposed_construction_plan, sample_file, search_file, **submit_review**
+
+The `submit_review` tool replaces the original free-text "valid"/"retry" convention
+from the ADK version. This eliminates fragile string parsing in the refinement loop:
+
+```python
+# submit_review tool schema
+submit_review:
+  verdict: "valid" | "retry"     # enum, no ambiguity
+  problems: ["problem 1", ...]   # empty list if valid
+
+# handler stores structured result in state
+def handle_submit_review(state, verdict, problems):
+    state["_critic_verdict"] = verdict    # "valid" or "retry"
+    state["_critic_problems"] = problems  # list of strings
+```
+
+**Why this departs from the original:** The ADK version relied on parsing the critic's
+text response for the word "valid". With the Anthropic API, tool use gives us structured
+output natively. The refinement loop checks `state["_critic_verdict"] == "valid"` instead
+of guessing from free text.
+
+### Component 3: Refinement Loop
+
+Python function replacing the ADK `LoopAgent` + `CheckStatusAndEscalate`:
+
+```python
+def run_refinement_loop(state, message=..., max_iterations=2):
+    state["feedback"] = state.get("feedback", "")
+    state["_refinement_trace"] = []
+
+    for iteration in range(max_iterations):
+        # 1. Run proposal agent (fresh conversation, feedback in system prompt)
+        response, state, _ = proposal_agent.run(message, state, conversation=None)
+
+        # 2. Run critic agent (fresh conversation)
+        critic_response, state, _ = critic_agent.run("Validate...", state, conversation=None)
+
+        # 3. Read structured verdict from state (set by submit_review tool)
+        verdict = state.get("_critic_verdict", "retry")
+        problems = state.get("_critic_problems", [])
+
+        # 4. Build feedback string for next iteration
+        state["feedback"] = critic_response
+
+        # 5. Record trace for debugging
+        state["_refinement_trace"].append({
+            "iteration": iteration + 1,
+            "proposal_summary": response[:500],
+            "critic_verdict": verdict,
+            "critic_problems": problems,
+            "critic_response": critic_response[:500],
+        })
+
+        # 6. Check status (equivalent to CheckStatusAndEscalate)
+        if verdict == "valid":
+            break
+
+    return (summary, state)
+```
+
+Key behaviors:
+- Each sub-agent gets a **fresh conversation** per iteration (no memory between loops)
+- Proposal agent receives feedback through `{feedback}` in its system prompt
+- Critic uses the `submit_review` tool to record a structured verdict (see Component 2)
+- Loop checks `state["_critic_verdict"]` instead of parsing free text
+- Every iteration is recorded in `state["_refinement_trace"]` for debugging
+- Stops when verdict is `"valid"` or max iterations (2) reached
+
+#### Refinement tracing
+
+The loop stores a trace in `state["_refinement_trace"]` so that inner agent behavior
+can be inspected after the loop completes. Each entry records:
+
+```python
+{
+    "iteration": 1,
+    "proposal_summary": "First 500 chars of proposal agent response...",
+    "critic_verdict": "valid" | "retry",
+    "critic_problems": ["problem 1", "problem 2"],   # empty if valid
+    "critic_response": "First 500 chars of critic agent response...",
+}
+```
+
+This is essential for debugging since inner conversations are discarded each iteration.
+
+#### Direct usage (without coordinator)
+
+The refinement loop can be called directly for tests and pipeline scripts,
+bypassing the coordinator:
+
+```python
+# Direct path (tests, pipelines) — no coordinator overhead:
+from pipelines.schema_loop import run_refinement_loop
+summary, state = run_refinement_loop(state)
+
+# MCP path (user interaction) — coordinator manages conversation:
+coordinator = SchemaProposalCoordinator()
+response, state, conversation = coordinator.run(message, state, conversation)
+```
+
+This avoids an unnecessary Claude API call when the coordinator's decision is
+deterministic (e.g., in automated tests or the full pipeline).
+
+### Component 4: Schema Proposal Coordinator
+
+User-facing agent that wraps the refinement loop as a tool:
+
+```
+You are a coordinator for the schema proposal process. Use tools to propose
+a schema to the user.
+
+WORKFLOW:
+1. Use 'run_refinement_loop' to produce or update a proposed schema.
+2. Use 'get_proposed_construction_plan' to get the construction rules.
+3. Present the proposed schema and construction rules to the user for approval.
+4. If the user disapproves, consider their feedback and run the loop again.
+5. If the user approves, use 'approve_proposed_construction_plan' to record it.
+
+GUIDANCE:
+- Always run the refinement loop first before presenting results
+- Present the schema clearly: nodes with labels, IDs, properties;
+  relationships with types, source/target nodes, properties
+- Ask the user explicitly if they approve the schema
+- Only approve when user explicitly says 'approve', 'looks good', etc.
+```
+
+**Tools (3):** run_refinement_loop, get_proposed_construction_plan,
+approve_proposed_construction_plan
+
+Maintains conversation history across user turns (multi-turn via MCP sessions).
 
 ## Input
 
 ```python
-state["approved_user_goal"] = {...}
-state["approved_files"] = ["products.csv", "suppliers.csv", ...]
+state["approved_user_goal"] = {
+    "kind_of_graph": "supply chain analysis",
+    "graph_description": "A multi-level bill of materials for manufactured products..."
+}
+state["approved_files"] = {
+    "structured": [
+        {"path": "products.csv", "reason": "Product entities"},
+        {"path": "suppliers.csv", "reason": "Supplier entities"},
+        ...
+    ],
+    "unstructured": [...]
+}
 ```
 
 ## Output
@@ -66,396 +345,175 @@ state["approved_construction_plan"] = {
 }
 ```
 
-## Agent Instructions
+## Tools Reference
 
-```
-You are a knowledge graph schema designer. Your job is to analyze CSV files and propose 
-a graph schema that will represent the data effectively.
+### Reused from Stage 2
 
-For each CSV file, determine:
-- Should it become nodes, relationships, or both?
-- What should the node label or relationship type be?
-- Which column uniquely identifies each row?
-- What properties should be included?
+**get_approved_user_goal** — Retrieve the approved user goal from state.
 
-Schema Design Rules:
-1. Node labels should be singular nouns in PascalCase (Product, not Products)
-2. Relationship types should be SCREAMING_SNAKE_CASE (SUPPLIED_BY, PART_OF)
-3. Every node type needs a unique identifier column
-4. Relationships need from_node and to_node references
-5. Consider the user's goal when deciding what to include
+**sample_file** — Read first N lines of a file to inspect content.
 
-Workflow:
-1. Get the approved user goal and files
-2. Sample each CSV file to understand its structure
-3. For each file, use propose_node_construction or propose_relationship_construction
-4. Use search_file to validate that referenced columns exist
-5. Present the complete proposal to the user
-6. If user requests changes, use remove_construction to remove items and re-propose
-7. When user approves, call approve_construction_plan
-```
+### New Tools
 
-## Tools
+**get_approved_files**
+- Input: None
+- Effect: Reads `state["approved_files"]` and extracts file paths
+- Returns: structured_files, unstructured_files, all_files lists
 
-### get_approved_user_goal / get_approved_files
+**search_file**
+- Input: `file_path` (relative), `query` (string)
+- Effect: Case-insensitive line-by-line search in text file
+- Returns: Matching lines with line numbers, metadata
+- Purpose: Validate column names exist, check data patterns
+- Security: Path traversal prevention (same as sample_file)
 
-Same as Stage 2 - retrieve context from state.
+**propose_node_construction**
+- Input: `approved_file`, `proposed_label`, `unique_column_name`, `proposed_properties`
+- Precondition: Validates `unique_column_name` exists in file via search_file
+- Effect: Adds node rule to `state["proposed_construction_plan"][proposed_label]`
+- Returns: The node construction rule
 
-### sample_file
+**propose_relationship_construction**
+- Input: `approved_file`, `proposed_relationship_type`, `from_node_label`,
+  `from_node_column`, `to_node_label`, `to_node_column`, `proposed_properties`
+- Precondition: Validates both column names exist in file via search_file
+- Effect: Adds relationship rule to `state["proposed_construction_plan"][proposed_relationship_type]`
+- Returns: The relationship construction rule
 
-Same as Stage 2 - preview file content.
+**remove_node_construction**
+- Input: `node_label`
+- Effect: Removes node rule from proposed plan by label
+- Returns: Success (idempotent if not found)
 
-### search_file
+**remove_relationship_construction**
+- Input: `relationship_type`
+- Effect: Removes relationship rule from proposed plan by type
+- Returns: Success (idempotent if not found)
 
-Search for patterns in a file (like grep). Useful to validate column names exist.
+**get_proposed_construction_plan**
+- Input: None
+- Effect: Reads `state["proposed_construction_plan"]`
+- Returns: Full plan with node_count and relationship_count summary
 
-```python
-TOOL_SCHEMA = {
-    "name": "search_file",
-    "description": "Search for a pattern in a file. Useful to verify column names or data patterns.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "file_path": {
-                "type": "string",
-                "description": "Path to the file"
-            },
-            "pattern": {
-                "type": "string",
-                "description": "Text pattern to search for"
-            }
-        },
-        "required": ["file_path", "pattern"]
-    }
-}
+**approve_proposed_construction_plan**
+- Input: None
+- Precondition: `state["proposed_construction_plan"]` exists and is non-empty
+- Effect: Copies proposed to `state["approved_construction_plan"]`
+- Returns: Success with the approved plan
 
-def handle_search_file(state: dict, file_path: str, pattern: str) -> dict:
-    import os
-    import re
-    
-    data_dir = os.environ.get("NEO4J_IMPORT_DIR", "./data")
-    full_path = os.path.join(data_dir, file_path)
-    
-    matches = []
-    try:
-        with open(full_path, 'r') as f:
-            for i, line in enumerate(f):
-                if re.search(pattern, line, re.IGNORECASE):
-                    matches.append({"line": i + 1, "content": line.strip()})
-                if len(matches) >= 10:  # Limit results
-                    break
-        
-        return {
-            "status": "success",
-            "pattern": pattern,
-            "matches": matches,
-            "found": len(matches) > 0
-        }
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-```
+### Critic-Only Tool
 
-### propose_node_construction
+**submit_review**
+- Input: `verdict` (enum: "valid" or "retry"), `problems` (array of strings)
+- Effect: Stores `state["_critic_verdict"]` and `state["_critic_problems"]`
+- Returns: Confirmation of recorded verdict
+- Note: The refinement loop reads these state keys to decide whether to stop or iterate
 
-Propose how a CSV file should be converted to nodes.
+### Coordinator-Only Tool
 
-```python
-TOOL_SCHEMA = {
-    "name": "propose_node_construction",
-    "description": "Propose that a CSV file should be converted to graph nodes.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "name": {
-                "type": "string",
-                "description": "Unique name for this construction rule (usually same as label)"
-            },
-            "source_file": {
-                "type": "string",
-                "description": "CSV file path"
-            },
-            "label": {
-                "type": "string",
-                "description": "Node label in PascalCase"
-            },
-            "unique_column_name": {
-                "type": "string",
-                "description": "Column that uniquely identifies each row"
-            },
-            "properties": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "List of columns to include as node properties"
-            }
-        },
-        "required": ["name", "source_file", "label", "unique_column_name", "properties"]
-    }
-}
-
-def handle_propose_node_construction(state: dict, name: str, source_file: str, 
-                                     label: str, unique_column_name: str, 
-                                     properties: list) -> dict:
-    if "proposed_construction_plan" not in state:
-        state["proposed_construction_plan"] = {}
-    
-    state["proposed_construction_plan"][name] = {
-        "construction_type": "node",
-        "source_file": source_file,
-        "label": label,
-        "unique_column_name": unique_column_name,
-        "properties": properties
-    }
-    
-    return {
-        "status": "success",
-        "message": f"Node construction '{name}' added to proposal.",
-        "construction": state["proposed_construction_plan"][name]
-    }
-```
-
-### propose_relationship_construction
-
-Propose how a CSV file should be converted to relationships.
-
-```python
-TOOL_SCHEMA = {
-    "name": "propose_relationship_construction",
-    "description": "Propose that a CSV file should be used to create relationships between nodes.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "name": {
-                "type": "string",
-                "description": "Unique name for this construction rule"
-            },
-            "source_file": {
-                "type": "string",
-                "description": "CSV file path"
-            },
-            "relationship_type": {
-                "type": "string",
-                "description": "Relationship type in SCREAMING_SNAKE_CASE"
-            },
-            "from_node_label": {
-                "type": "string",
-                "description": "Label of the source node"
-            },
-            "from_node_column": {
-                "type": "string",
-                "description": "Column containing the source node ID"
-            },
-            "to_node_label": {
-                "type": "string",
-                "description": "Label of the target node"
-            },
-            "to_node_column": {
-                "type": "string",
-                "description": "Column containing the target node ID"
-            },
-            "properties": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "List of columns to include as relationship properties"
-            }
-        },
-        "required": ["name", "source_file", "relationship_type", 
-                     "from_node_label", "from_node_column",
-                     "to_node_label", "to_node_column"]
-    }
-}
-
-def handle_propose_relationship_construction(state: dict, name: str, source_file: str,
-                                             relationship_type: str,
-                                             from_node_label: str, from_node_column: str,
-                                             to_node_label: str, to_node_column: str,
-                                             properties: list = None) -> dict:
-    if "proposed_construction_plan" not in state:
-        state["proposed_construction_plan"] = {}
-    
-    state["proposed_construction_plan"][name] = {
-        "construction_type": "relationship",
-        "source_file": source_file,
-        "relationship_type": relationship_type,
-        "from_node_label": from_node_label,
-        "from_node_column": from_node_column,
-        "to_node_label": to_node_label,
-        "to_node_column": to_node_column,
-        "properties": properties or []
-    }
-    
-    return {
-        "status": "success",
-        "message": f"Relationship construction '{name}' added to proposal.",
-        "construction": state["proposed_construction_plan"][name]
-    }
-```
-
-### remove_construction
-
-Remove a proposed construction rule.
-
-```python
-TOOL_SCHEMA = {
-    "name": "remove_construction",
-    "description": "Remove a construction rule from the proposal.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "name": {
-                "type": "string",
-                "description": "Name of the construction rule to remove"
-            }
-        },
-        "required": ["name"]
-    }
-}
-
-def handle_remove_construction(state: dict, name: str) -> dict:
-    if "proposed_construction_plan" not in state:
-        return {"status": "error", "message": "No construction plan exists."}
-    
-    if name not in state["proposed_construction_plan"]:
-        return {"status": "error", "message": f"Construction '{name}' not found."}
-    
-    del state["proposed_construction_plan"][name]
-    return {"status": "success", "message": f"Removed '{name}' from proposal."}
-```
-
-### get_proposed_construction_plan
-
-Retrieve the current proposal for display.
-
-```python
-TOOL_SCHEMA = {
-    "name": "get_proposed_construction_plan",
-    "description": "Get the current proposed construction plan to review or present to user.",
-    "input_schema": {
-        "type": "object",
-        "properties": {},
-        "required": []
-    }
-}
-
-def handle_get_proposed_construction_plan(state: dict) -> dict:
-    plan = state.get("proposed_construction_plan", {})
-    return {
-        "status": "success",
-        "proposed_construction_plan": plan,
-        "node_count": sum(1 for v in plan.values() if v["construction_type"] == "node"),
-        "relationship_count": sum(1 for v in plan.values() if v["construction_type"] == "relationship")
-    }
-```
-
-### approve_construction_plan
-
-Finalize after user approval.
-
-```python
-TOOL_SCHEMA = {
-    "name": "approve_construction_plan",
-    "description": "Finalize the construction plan after user explicitly approves.",
-    "input_schema": {
-        "type": "object",
-        "properties": {},
-        "required": []
-    }
-}
-
-def handle_approve_construction_plan(state: dict) -> dict:
-    if "proposed_construction_plan" not in state:
-        return {"status": "error", "message": "No proposed plan to approve."}
-    
-    if not state["proposed_construction_plan"]:
-        return {"status": "error", "message": "Proposed plan is empty."}
-    
-    state["approved_construction_plan"] = state["proposed_construction_plan"].copy()
-    return {
-        "status": "success",
-        "message": "Construction plan approved.",
-        "approved_construction_plan": state["approved_construction_plan"]
-    }
-```
+**run_refinement_loop**
+- Input: `user_feedback` (optional string)
+- Effect: Runs the proposal-critic loop (2 iterations max), populates
+  `state["proposed_construction_plan"]`
+- Returns: Summary of loop result, node/relationship counts
 
 ## Example Conversation
 
 ```
-User: Design the schema for our supply chain graph
+User: Design the schema for our supply chain knowledge graph
 
-Agent: I'll analyze the approved files and design a schema. Let me start by examining each file.
+Coordinator: [Calls run_refinement_loop]
+  |
+  +-> Proposal Agent:
+  |     [Calls get_approved_user_goal]
+  |     [Calls get_approved_files]
+  |     [Calls sample_file("products.csv")]  -- sees product_id, product_name, price
+  |     [Calls search_file("products.csv", "product_id")]  -- verifies uniqueness
+  |     [Calls propose_node_construction("products.csv", "Product", "product_id", [...])]
+  |     ... (analyzes all 5 files) ...
+  |     [Calls get_proposed_construction_plan]  -- presents result
+  |
+  +-> Critic Agent:
+  |     [Calls get_proposed_construction_plan]
+  |     [Calls search_file to validate identifiers]
+  |     [Calls submit_review(verdict="valid", problems=[])]
+  |
+  +-> Loop exits
 
-[Calls get_approved_user_goal]
-[Calls get_approved_files]
-[Calls sample_file("products.csv")]
+Coordinator: [Calls get_proposed_construction_plan]
 
-Products.csv has columns: product_id, product_name, price, description
-This should be a Product node.
-
-[Calls propose_node_construction(
-    name="Product",
-    source_file="products.csv",
-    label="Product",
-    unique_column_name="product_id",
-    properties=["product_name", "price", "description"]
-)]
-
-[Continues analyzing other files...]
-
-Here's my proposed schema:
+Here's the proposed schema:
 
 **Nodes:**
-1. Product (from products.csv) - id: product_id
-2. Assembly (from assemblies.csv) - id: assembly_id
-3. Part (from parts.csv) - id: part_id
-4. Supplier (from suppliers.csv) - id: supplier_id
+1. Product (from products.csv) - key: product_id
+2. Assembly (from assemblies.csv) - key: assembly_id
+3. Part (from parts.csv) - key: part_id
+4. Supplier (from suppliers.csv) - key: supplier_id
 
 **Relationships:**
-1. Product -[CONTAINS]-> Assembly (from assemblies.csv)
-2. Assembly -[HAS_PART]-> Part (from parts.csv)
+1. Assembly -[PART_OF]-> Product (from assemblies.csv, via product_id)
+2. Part -[COMPONENT_OF]-> Assembly (from parts.csv, via assembly_id)
 3. Part -[SUPPLIED_BY]-> Supplier (from part_supplier_mapping.csv)
 
-This creates a hierarchy: Product → Assembly → Part → Supplier
-
-Does this look correct? Would you like any changes?
-
-User: The relationship should be PART_OF not HAS_PART, and direction should be Assembly -[PART_OF]-> Product
-
-Agent: You're right, let me fix that.
-
-[Calls remove_construction("CONTAINS")]
-[Calls propose_relationship_construction with corrected direction and name]
-
-Updated schema shows Assembly -[PART_OF]-> Product.
-
-Is this better?
+Would you like to approve this schema?
 
 User: Yes, approve it
 
-Agent: [Calls approve_construction_plan]
+Coordinator: [Calls approve_proposed_construction_plan]
 
-✅ Construction plan approved!
-
-- 4 node types: Product, Assembly, Part, Supplier
-- 3 relationship types: PART_OF, HAS_PART, SUPPLIED_BY
-
-Ready for entity extraction from unstructured data.
+Construction plan approved! 4 node types, 3 relationship types.
+Ready for entity extraction.
 ```
+
+## File Structure
+
+```
+tools/
+  schema_tools.py              # NEW: 9 tool schemas + handlers
+
+agents/
+  schema_proposal.py           # NEW: Inner proposal agent (9 tools, no approval)
+  schema_critic.py             # NEW: Inner critic agent (5 read-only tools)
+  schema_coordinator.py        # NEW: User-facing coordinator (3 tools)
+
+pipelines/
+  __init__.py                  # NEW: Package init
+  schema_loop.py               # NEW: run_refinement_loop()
+
+mcp_server/
+  server.py                    # UPDATE: Add kg_schema_proposal tool
+
+tests/
+  unit/
+    test_schema_tools.py       # NEW: Unit tests for handlers
+  test_03_verify.py            # NEW: Automated verification test
+  test_03_schema_proposal.py   # NEW: Interactive test
+```
+
+## Naming Conventions
+
+- **Node labels:** PascalCase — `Product`, `Supplier`, `Part`, `Assembly`
+- **Relationship types:** SCREAMING_SNAKE_CASE — `SUPPLIED_BY`, `PART_OF`, `COMPONENT_OF`
+- **Unique identifiers:** Every node type must have exactly one unique column
+- **Connected graph:** No isolated nodes; every node connects to at least one other
 
 ## Success Criteria
 
-1. Agent analyzes ALL approved CSV files
-2. Agent validates column names exist before proposing
-3. Schema follows naming conventions (PascalCase nodes, SCREAMING_SNAKE_CASE relationships)
-4. Every node type has a unique identifier
-5. Relationships correctly reference existing node types
-6. Agent iterates based on user feedback
-7. Final schema is logically complete for the stated goal
+1. Proposal agent analyzes ALL approved CSV files
+2. Proposal agent validates column names via search_file before proposing
+3. Critic agent independently validates the proposal
+4. Refinement loop converges within 2 iterations
+5. Schema follows naming conventions
+6. Every node type has a unique identifier
+7. Relationships correctly reference existing node types
+8. Coordinator presents results clearly and handles user feedback
+9. Final approved plan is logically complete for the stated goal
 
 ## Common Issues
 
-1. **Missing relationships** - Agent may create nodes but forget relationships. Instruction should emphasize completeness.
-
-2. **Wrong relationship direction** - Common mistake. Agent should state direction clearly and confirm with user.
-
-3. **Column name typos** - Use search_file to validate columns exist before proposing.
-
-4. **Inconsistent naming** - Add validation in tool handlers for naming conventions.
+1. **Missing relationships** — Proposal hints emphasize detecting reference relationships in node files (foreign keys like `product_id` in `assemblies.csv`)
+2. **Wrong relationship direction** — Critic validates by tracing through source data
+3. **Column name typos** — Both agents use search_file to validate columns exist
+4. **Composite identifiers** — Critic explicitly rejects these as unacceptable
+5. **Isolated nodes** — Both agents check for graph connectivity
+6. **Redundant relationships** — Critic checks for semantically equivalent or inverse relationships

@@ -123,12 +123,17 @@ def run_agent_sync(
     tool_handlers: dict[str, Callable],
     conversation: list[dict] | None = None,
     model: str = "claude-sonnet-4-20250514",
-    max_tokens: int = 4096
+    max_tokens: int = 4096,
+    max_turns: int = 50
 ) -> tuple[str, dict, list[dict]]:
     """Synchronous version of run_agent.
 
     Same as run_agent but runs synchronously. Useful for simple scripts
     and testing.
+
+    Args:
+        max_turns: Maximum number of API calls (turn limit). Prevents infinite loops.
+            Default is 50 turns. Each tool use counts as one turn.
 
     See run_agent for full documentation.
     """
@@ -145,7 +150,10 @@ def run_agent_sync(
     })
 
     # Agent loop: continue until we get a text response (not tool_use)
-    while True:
+    turn_count = 0
+    while turn_count < max_turns:
+        turn_count += 1
+
         # Build request parameters
         params = {
             "model": model,
@@ -195,10 +203,18 @@ def run_agent_sync(
             "content": tool_results
         })
 
+    # Check if we hit max turns
+    if turn_count >= max_turns:
+        print(f"WARNING: Agent reached max_turns limit ({max_turns}). Forcing exit.")
+
     # Extract final text response
     final_response = ""
     for block in response.content:
         if hasattr(block, 'text'):
             final_response += block.text
+
+    # If no text response due to max_turns, return a warning message
+    if not final_response and turn_count >= max_turns:
+        final_response = f"[Agent reached max_turns limit ({max_turns}) without completing response]"
 
     return final_response, state, conversation
