@@ -17,7 +17,7 @@ load_dotenv(os.path.join(_root_dir, ".env"))
 
 from fastmcp import FastMCP
 
-from agents import UserIntentAgent
+from agents import UserIntentAgent, FileSuggestionAgent
 from core import load_state, save_state
 
 
@@ -58,6 +58,13 @@ STATE_FILE = os.path.join(
     "current_state.json"
 )
 
+# Keys used to store per-agent conversation histories inside the state file.
+_CONVERSATION_KEYS = [
+    "_user_intent_conversation",
+    "_file_suggestion_conversation",
+    "_conversation_history",  # legacy (US002 backward compat)
+]
+
 
 def serialize_conversation(conversation: list) -> list:
     """Convert conversation to JSON-serializable format.
@@ -90,30 +97,54 @@ def serialize_conversation(conversation: list) -> list:
     return serialized
 
 
-def load_session() -> tuple[dict, list]:
-    """Load state and conversation from disk.
+def load_session(conversation_key: str) -> tuple[dict, list]:
+    """Load state and a specific agent's conversation from disk.
+
+    Args:
+        conversation_key: Key for the agent's conversation history
+            (e.g. "_user_intent_conversation").
 
     Returns:
-        Tuple of (state dict, conversation list).
+        Tuple of (state dict without conversation keys, conversation list).
         Conversation may be None if no history exists.
     """
-    state = load_state(STATE_FILE)
-    conversation = state.pop("_conversation_history", None)
+    raw_state = load_state(STATE_FILE)
+
+    conversation = raw_state.get(conversation_key)
+
+    # Backward compat: legacy key for user intent
+    if conversation is None and conversation_key == "_user_intent_conversation":
+        conversation = raw_state.get("_conversation_history")
+
+    # Return clean state (no conversation keys)
+    state = {k: v for k, v in raw_state.items() if k not in _CONVERSATION_KEYS}
     return state, conversation
 
 
-def save_session(state: dict, conversation: list) -> None:
-    """Save state and conversation to disk.
+def save_session(state: dict, conversation: list, conversation_key: str) -> None:
+    """Save state and a specific agent's conversation to disk.
+
+    Merges the agent state into the existing raw state so that other agents'
+    conversation histories are preserved.
 
     Args:
-        state: State dictionary to save.
+        state: State dictionary to save (should not contain conversation keys).
         conversation: Conversation history to save.
+        conversation_key: Key for the agent's conversation history.
     """
-    state_to_save = state.copy()
+    raw_state = load_state(STATE_FILE)
+
+    # Update state keys (skip conversation keys coming from the agent state)
+    for k, v in state.items():
+        if k not in _CONVERSATION_KEYS:
+            raw_state[k] = v
+
+    # Save this agent's conversation
     serialized = serialize_conversation(conversation)
     if serialized:
-        state_to_save["_conversation_history"] = serialized
-    save_state(state_to_save, STATE_FILE)
+        raw_state[conversation_key] = serialized
+
+    save_state(raw_state, STATE_FILE)
 
 
 @mcp.tool
@@ -126,9 +157,9 @@ def kg_get_state() -> dict:
     Returns:
         Dictionary with current state (excludes internal metadata).
     """
-    state, _ = load_session()
+    raw_state = load_state(STATE_FILE)
     # Filter out internal keys (those starting with _)
-    return {k: v for k, v in state.items() if not k.startswith("_")}
+    return {k: v for k, v in raw_state.items() if not k.startswith("_")}
 
 
 @mcp.tool
@@ -146,12 +177,12 @@ def kg_user_intent(message: str) -> dict:
     Returns:
         Dictionary with agent response and current status.
     """
-    state, conversation = load_session()
+    state, conversation = load_session("_user_intent_conversation")
 
     agent = UserIntentAgent()
     response, state, conversation = agent.run(message, state, conversation)
 
-    save_session(state, conversation)
+    save_session(state, conversation, "_user_intent_conversation")
 
     # Build status info
     status = {
@@ -163,6 +194,46 @@ def kg_user_intent(message: str) -> dict:
         status["proposed_goal"] = state["proposed_user_goal"]
     if "approved_user_goal" in state:
         status["approved_goal"] = state["approved_user_goal"]
+
+    return {
+        "agent_response": response,
+        "status": status
+    }
+
+
+@mcp.tool
+def kg_file_suggestion(message: str) -> dict:
+    """Send a message to the File Suggestion Agent.
+
+    Pass the user's message exactly as they wrote it. Do NOT add context,
+    file contents, or analysis — the agent will ask its own questions.
+
+    This is a multi-turn conversation. Call this tool once per user message.
+    Stage 1 (User Intent) must be completed before using this agent.
+
+    Args:
+        message: The user's message, passed through exactly as written.
+
+    Returns:
+        Dictionary with agent response and current status.
+    """
+    state, conversation = load_session("_file_suggestion_conversation")
+
+    agent = FileSuggestionAgent()
+    response, state, conversation = agent.run(message, state, conversation)
+
+    save_session(state, conversation, "_file_suggestion_conversation")
+
+    # Build status info
+    status = {
+        "has_proposed_files": "proposed_files" in state,
+        "has_approved_files": "approved_files" in state,
+    }
+
+    if "proposed_files" in state:
+        status["proposed_files"] = state["proposed_files"]
+    if "approved_files" in state:
+        status["approved_files"] = state["approved_files"]
 
     return {
         "agent_response": response,
