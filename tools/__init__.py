@@ -44,6 +44,19 @@ from tools.schema_tools import (
     build_file_context,
 )
 
+from tools.extraction_tools import (
+    TOOL_SET_PROPOSED_ENTITIES,
+    TOOL_GET_PROPOSED_ENTITIES,
+    TOOL_APPROVE_PROPOSED_ENTITIES,
+    handle_set_proposed_entities,
+    handle_get_proposed_entities,
+    handle_approve_proposed_entities,
+    build_markdown_context,
+    build_well_known_types,
+    build_structured_preview,
+    build_entity_types_context,
+)
+
 __all__ = [
     # Intent tools (Stage 1)
     "TOOL_SET_PROPOSED_GOAL",
@@ -83,4 +96,15 @@ __all__ = [
     "handle_approve_proposed_construction_plan",
     "handle_submit_review",
     "build_file_context",
+    # Extraction tools (Stages 4 & 5)
+    "TOOL_SET_PROPOSED_ENTITIES",
+    "TOOL_GET_PROPOSED_ENTITIES",
+    "TOOL_APPROVE_PROPOSED_ENTITIES",
+    "handle_set_proposed_entities",
+    "handle_get_proposed_entities",
+    "handle_approve_proposed_entities",
+    "build_markdown_context",
+    "build_well_known_types",
+    "build_structured_preview",
+    "build_entity_types_context",
 ]

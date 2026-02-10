@@ -12,7 +12,7 @@ These entities will form the Subject Graph that bridges to the Domain Graph.
    - We want to find mentions of products in the text
 
 2. **Discovered entities**: New types found in the text that support the user's goal
-   - Example: "Issue", "Feature", "Reviewer" found in product reviews
+   - Example: "Issue", "Feature" found in product reviews
    - These add depth to the knowledge graph
 
 ## Input
@@ -30,92 +30,253 @@ state["approved_construction_plan"] = {
 ## Output
 
 ```python
-state["approved_entity_types"] = [
-    "Product",   # Well-known (from construction plan)
-    "Issue",     # Discovered
-    "Feature",   # Discovered
-    "Reviewer"   # Discovered
-]
+state["approved_entity_types"] = {
+    "Product": {
+        "source": "well_known",
+        "description": "Products mentioned in reviews, bridges to existing Product nodes"
+    },
+    "Issue": {
+        "source": "discovered",
+        "description": "Problems reported by reviewers that support root cause analysis"
+    },
+    "Feature": {
+        "source": "discovered",
+        "description": "Product characteristics mentioned in reviews"
+    }
+}
 ```
+
+Each entity type includes:
+- **source**: `"well_known"` (from construction plan) or `"discovered"` (found in text)
+- **description**: What this entity type represents and why it's relevant
+
+## Pre-computation Pattern
+
+Like the Schema Proposal Agent (Stage 3), the NER agent uses pre-computed context
+injected into the system prompt. This avoids multiple tool calls for context gathering.
+
+### `build_markdown_context(state)`
+
+Reads all approved markdown files and builds a **structure-aware preview**.
+Instead of reading just the first N lines, it parses the markdown heading
+structure and extracts the first few lines of each section. This ensures
+the agent sees every section of the document, even for long non-repetitive
+files where important entity types may only appear in specific sections.
+
+```python
+def build_structured_preview(file_path: str, lines_per_section: int = 5) -> str:
+    """Extract heading structure + first N lines of each section.
+
+    Parses markdown headings (#, ##, ###) and captures the first
+    lines_per_section lines after each heading. This gives visibility
+    into every section of the document regardless of file length.
+    """
+    lines = read_all_lines(file_path)
+    total = len(lines)
+
+    sections = []
+    current_heading = None
+    current_lines = []
+
+    for i, line in enumerate(lines):
+        if line.startswith('#'):
+            if current_heading:
+                preview = current_lines[:lines_per_section]
+                sections.append((current_heading, preview))
+            current_heading = (i + 1, line.strip())
+            current_lines = []
+        else:
+            current_lines.append(line)
+
+    if current_heading:
+        preview = current_lines[:lines_per_section]
+        sections.append((current_heading, preview))
+
+    # Format output
+    output = [f"=== {file_path} ({total} lines) ===\n"]
+    for (line_num, heading), preview in sections:
+        output.append(f"{heading}  [line {line_num}]")
+        for p in preview:
+            if p.strip():
+                output.append(f"  {p.rstrip()}")
+        output.append("")
+
+    return "\n".join(output)
+
+
+def build_markdown_context(state: dict) -> str:
+    """Build structure-aware preview context for all approved markdown files."""
+    approved_files = state.get("approved_files", {})
+    unstructured = approved_files.get("unstructured", [])
+
+    parts = []
+    for file_entry in unstructured:
+        path = file_entry["path"]
+        full_path = resolve_data_path(path)
+        parts.append(build_structured_preview(full_path))
+
+    return "\n".join(parts)
+```
+
+For a 380-line audit report with 10 sections, this produces ~60 lines of
+structured preview covering every section — compared to 15 lines from just
+the top. The line numbers (`[line 26]`) allow the agent to make informed
+`sample_file` calls to read specific sections in full.
+
+### `build_well_known_types(state)`
+
+Extracts node labels from the construction plan:
+
+```python
+def build_well_known_types(state: dict) -> str:
+    """Extract well-known entity types from the approved construction plan."""
+    plan = state.get("approved_construction_plan", {})
+    types = [
+        entry["label"]
+        for entry in plan.values()
+        if entry.get("construction_type") == "node"
+    ]
+    return ", ".join(types) if types else "(none)"
+```
+
+Both are injected into the system prompt via template placeholders:
+`{user_goal}`, `{well_known_types}`, `{file_context}`.
 
 ## Agent Instructions
 
 ```
-You are a named entity recognition specialist. Your job is to analyze text files and 
-identify the types of entities that could be extracted for a knowledge graph.
+You are a named entity recognition specialist working on a knowledge graph.
+Your job is to analyze text files and propose the types of entities that
+could be extracted to enrich the graph.
 
-Entity types are categories of people, places, things, and qualities - NOT individual instances.
+Entity types are categories of people, places, things, and qualities -
+NOT individual instances.
 For example: "Product" is an entity type, "Gothenburg Table" is an instance.
 
-Two approaches to finding entity types:
+## User Goal
+
+{user_goal}
+
+## Well-Known Entity Types
+
+These node labels already exist in the graph schema:
+
+{well_known_types}
+
+## File Previews
+
+Structure-aware previews of the approved markdown files are shown below.
+Each preview shows the document's heading structure with the first few
+lines of each section. Use these to understand what kinds of entities
+appear across the entire document.
+
+You can use the sample_file tool to read more content from a specific
+section when the preview is not sufficient. The user may also ask you
+to look deeper into files or sections you did not consider.
+
+{file_context}
+
+## How to Identify Entity Types
+
+There are two approaches:
 
 1. Well-known entities (ALWAYS include these):
-   - Check the approved construction plan for existing node labels
-   - If those entities appear in the text, include them
-   - Example: If "Product" nodes exist and products are mentioned in reviews, include "Product"
+   - The well-known types listed above come from the existing graph schema.
+   - If those types of entities appear in the text, always include them.
+   - These bridge unstructured text to the structured graph.
+   - Example: If "Product" is a well-known type and products are mentioned
+     in reviews, include "Product".
 
 2. Discovered entities:
-   - Look for consistent patterns in the text that support the user's goal
-   - Focus on entities that would provide useful connections
-   - Avoid quantities (prices, counts) - those are properties, not entities
-   - Example: For root cause analysis, "Issue" and "Feature" are useful entity types
+   - Look for categories of things consistently mentioned across files
+     that support the user's goal.
+   - Focus on entities that add depth or breadth to the existing graph.
+   - Example: If the goal is root cause analysis and the graph has "Product"
+     nodes, discovered types like "Issue" or "Feature" add analytical depth.
+   - Example: If the goal is social communities and the graph has "Person"
+     nodes, discovered types like "Hobby" or "Event" add breadth.
 
-Guidelines:
-- Entity types should be singular nouns in PascalCase
-- Prefer reusing existing types over creating new ones
+## What NOT to Propose
+
+- Quantities or measurements: "Rating", "Price", "Age", "Count" are
+  properties on an entity, not entities themselves. For example, "Age"
+  is better represented as a property on "Person", not as its own type.
+- Overly specific types: Prefer "Issue" over "BrokenLeg". Capture the
+  pattern, not the instance.
+- Types that don't support the stated goal: Every proposed type must
+  have a clear connection to what the user wants to achieve.
+
+## Disambiguation
+
+Be aware that a word can mean different things in different contexts.
+For example, "Assembly" may be a component type in the graph schema
+(a subassembly of a product) and also appear in reviews as the process
+of assembling furniture. These are different concepts. When in doubt,
+clarify with the user.
+
+## Quality Guidelines
+
+- Entity types should be singular nouns in PascalCase (e.g., "ProductIssue")
+- Prefer reusing well-known types over creating new ones
+- Quality over quantity: 3 to 6 meaningful types is better than 12 vague ones
 - Every proposed type should clearly support the user's goal
-- Quality over quantity - fewer meaningful types is better than many vague ones
+- For each proposed type, explain what it is and why it's relevant
 
-Workflow:
-1. Get the approved goal, files, and construction plan
-2. Identify well-known types from the construction plan
-3. Sample the markdown files to discover additional entity types
-4. Propose the combined list using set_proposed_entities
-5. Explain each entity type and why it's relevant
-6. Get user approval before finalizing
+## Transparency
+
+Always be transparent about your analysis process. Start your response
+by summarizing what you analyzed before presenting your proposal:
+- How many files you reviewed and how many sections across them
+- Which well-known types you found in the text
+- What patterns you noticed that led to discovered types
+- What you considered but excluded, and why (e.g., "I excluded Rating
+  because it's a quantity, not an entity")
+- If you used sample_file, explain what you read and what it revealed
+
+The user should never wonder what you did or what you looked at.
+
+## Workflow
+
+1. Review the user goal, well-known types, and file previews above
+2. If any section preview is truncated or unclear, use sample_file
+   to read more content (line numbers are provided in the previews)
+3. Identify which well-known types appear in the text
+4. Discover additional types that support the user's goal
+5. Propose the combined list using set_proposed_entities
+6. Present each type with:
+   - Whether it's well-known or discovered
+   - What it represents
+   - Why it supports the goal
+   - An example mention from the text
+7. Wait for user feedback - iterate if they want changes
+8. If the user asks you to look deeper into a file or section, use
+   sample_file and reconsider your proposal based on what you find
+9. Only call approve_proposed_entities when the user explicitly approves
 ```
 
 ## Tools
 
-### get_approved_user_goal / get_approved_files / sample_file
+Context-gathering tools (`get_approved_user_goal`, `get_approved_files`,
+`get_well_known_types`) are replaced by pre-computation. The agent
+keeps `sample_file` as an optional tool for reading deeper into files
+when the pre-computed preview is not sufficient.
 
-Same as previous stages.
+### sample_file (collaborative, imported from file_tools)
 
-### get_well_known_types
-
-Extract existing node labels from the construction plan.
+Read more content from a specific file. Can be used in two ways:
+- **Agent-initiated**: When a section preview is truncated or insufficient
+  to identify entity types
+- **User-directed**: When the user asks the agent to look deeper into
+  a file or section the agent did not consider
 
 ```python
-TOOL_SCHEMA = {
-    "name": "get_well_known_types",
-    "description": "Get existing node labels from the construction plan that could be entity types.",
-    "input_schema": {
-        "type": "object",
-        "properties": {},
-        "required": []
-    }
-}
-
-def handle_get_well_known_types(state: dict) -> dict:
-    construction_plan = state.get("approved_construction_plan", {})
-    
-    # Extract labels from node constructions
-    well_known = [
-        entry["label"] 
-        for entry in construction_plan.values() 
-        if entry.get("construction_type") == "node"
-    ]
-    
-    return {
-        "status": "success",
-        "well_known_types": well_known,
-        "count": len(well_known)
-    }
+# Reused from tools/file_tools.py - no new implementation needed.
+# Schema and handler are imported.
 ```
 
 ### set_proposed_entities
 
-Save the proposed entity type list.
+Save the proposed entity types with source and description metadata.
 
 ```python
 TOOL_SCHEMA = {
@@ -126,8 +287,26 @@ TOOL_SCHEMA = {
         "properties": {
             "entity_types": {
                 "type": "array",
-                "items": {"type": "string"},
-                "description": "List of entity type names in PascalCase"
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Entity type name in PascalCase (e.g., 'Product', 'Issue')"
+                        },
+                        "source": {
+                            "type": "string",
+                            "enum": ["well_known", "discovered"],
+                            "description": "Whether the type comes from the existing graph schema or was discovered in the text"
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "What this entity type represents and why it's relevant to the goal"
+                        }
+                    },
+                    "required": ["name", "source", "description"]
+                },
+                "description": "List of entity type definitions"
             }
         },
         "required": ["entity_types"]
@@ -135,19 +314,31 @@ TOOL_SCHEMA = {
 }
 
 def handle_set_proposed_entities(state: dict, entity_types: list) -> dict:
-    # Validate PascalCase
+    result = {}
     for et in entity_types:
-        if not et[0].isupper():
+        name = et["name"]
+        # Validate PascalCase
+        if not name[0].isupper():
             return {
                 "status": "error",
-                "message": f"Entity type '{et}' should be in PascalCase (e.g., 'ProductIssue')"
+                "message": f"Entity type '{name}' should be in PascalCase (e.g., 'ProductIssue')"
             }
-    
-    state["proposed_entity_types"] = entity_types
+        # Validate source
+        if et["source"] not in ("well_known", "discovered"):
+            return {
+                "status": "error",
+                "message": f"Source for '{name}' must be 'well_known' or 'discovered'"
+            }
+        result[name] = {
+            "source": et["source"],
+            "description": et["description"]
+        }
+
+    state["proposed_entity_types"] = result
     return {
         "status": "success",
-        "message": f"Proposed {len(entity_types)} entity types. Present to user for approval.",
-        "proposed_entity_types": entity_types
+        "message": f"Proposed {len(result)} entity types. Present to user for approval.",
+        "proposed_entity_types": result
     }
 ```
 
@@ -169,7 +360,7 @@ TOOL_SCHEMA = {
 def handle_get_proposed_entities(state: dict) -> dict:
     return {
         "status": "success",
-        "proposed_entity_types": state.get("proposed_entity_types", [])
+        "proposed_entity_types": state.get("proposed_entity_types", {})
     }
 ```
 
@@ -180,7 +371,7 @@ Finalize after user approval.
 ```python
 TOOL_SCHEMA = {
     "name": "approve_proposed_entities",
-    "description": "Finalize entity types after user explicitly approves.",
+    "description": "Finalize entity types after user explicitly approves. Only use when user explicitly says to approve.",
     "input_schema": {
         "type": "object",
         "properties": {},
@@ -189,10 +380,12 @@ TOOL_SCHEMA = {
 }
 
 def handle_approve_proposed_entities(state: dict) -> dict:
-    if "proposed_entity_types" not in state:
+    if "proposed_entity_types" not in state or not state["proposed_entity_types"]:
         return {"status": "error", "message": "No proposed entities to approve."}
-    
-    state["approved_entity_types"] = state["proposed_entity_types"].copy()
+
+    # Deep copy to avoid shared references
+    import copy
+    state["approved_entity_types"] = copy.deepcopy(state["proposed_entity_types"])
     return {
         "status": "success",
         "message": "Entity types approved.",
@@ -203,80 +396,79 @@ def handle_approve_proposed_entities(state: dict) -> dict:
 ## Example Conversation
 
 ```
-User: What entities can we extract from the product reviews?
+User: Analyze the product reviews and propose entity types for extraction.
 
-Agent: Let me analyze the reviews in context of your goal. First, I'll check what 
-entity types already exist in your graph schema.
+Agent: I've reviewed your goal, the existing graph schema, and previews of
+all 10 markdown files. Here's what I found:
 
-[Calls get_approved_user_goal]
-[Calls get_well_known_types]
+**Well-known types from the graph schema:**
+Product, Assembly, Part, Supplier
 
-Existing node types: Product, Assembly, Part, Supplier
-
-Now let me sample some review files to discover additional entity types.
-
-[Calls sample_file("product_reviews/gothenburg_table_reviews.md")]
-
-I can see the reviews contain:
+Looking at the file previews, I can see the reviews contain:
 - Product names (matches existing "Product" type)
 - Reviewer usernames
 - Ratings (numeric - this is a property, not an entity)
-- Issues mentioned (quality problems, assembly difficulty)
-- Product features (design, materials, functionality)
+- Issues mentioned: quality problems, assembly difficulty, reliability
+- Product features: design, materials, functionality
+
+"Assembly" appears in reviews but refers to the process of assembling
+furniture, not the component type in your graph schema. I'll exclude it
+to avoid confusion.
 
 Based on your root cause analysis goal, I propose these entity types:
 
-[Calls set_proposed_entities(["Product", "Issue", "Feature", "Reviewer"])]
+[Calls set_proposed_entities([
+    {"name": "Product", "source": "well_known", "description": "Products mentioned in reviews, bridges to existing Product nodes"},
+    {"name": "Issue", "source": "discovered", "description": "Problems reported by reviewers that support root cause analysis"},
+    {"name": "Feature", "source": "discovered", "description": "Product characteristics, useful for understanding which features cause issues"}
+])]
 
 **Proposed Entity Types:**
 
-1. **Product** (well-known) - Products mentioned in reviews
-2. **Issue** (discovered) - Problems reported: "wobbly legs", "missing screws", "scratched surface"
-3. **Feature** (discovered) - Product characteristics: "adjustable height", "solid wood", "modern design"
-4. **Reviewer** (discovered) - People who wrote reviews
+1. **Product** (well-known) - Products mentioned in reviews, bridges
+   review data to existing Product nodes in the graph.
+   Example: "The Gothenburg Table arrived with scratches"
 
-I excluded Location because it doesn't strongly support root cause analysis.
+2. **Issue** (discovered) - Problems reported by reviewers that support
+   root cause analysis. Consistently appears across all review files.
+   Example: "wobbly legs", "missing screws", "scratched surface"
+
+3. **Feature** (discovered) - Product characteristics mentioned in
+   reviews, useful for understanding which features cause issues.
+   Example: "adjustable height", "solid wood", "modern design"
+
+I excluded Reviewer because tracking who said what doesn't directly
+support root cause analysis. I excluded Rating because it's a numeric
+property, not an entity.
 
 Would you like to adjust this list?
 
-User: Looks good, but don't include Reviewer - we don't need to track who said what
-
-Agent: Good point. Let me update:
-
-[Calls set_proposed_entities(["Product", "Issue", "Feature"])]
-
-Updated list:
-1. **Product** - Products mentioned in reviews
-2. **Issue** - Problems reported in reviews  
-3. **Feature** - Product characteristics mentioned
-
-Approve this?
-
-User: Yes
+User: Looks good, approve it.
 
 Agent: [Calls approve_proposed_entities]
 
-✅ Entity types approved: Product, Issue, Feature
+Entity types approved: Product, Issue, Feature
 
 Next step is to define how these entities relate to each other (fact types).
 ```
 
 ## Success Criteria
 
-1. Agent retrieves existing well-known types from construction plan
-2. Agent samples multiple markdown files to understand content
-3. Proposed types are in PascalCase
-4. Agent distinguishes entities from properties (no numeric/quantitative types)
+1. Agent analyzes pre-computed file previews and well-known types (can optionally use sample_file for deeper reading)
+2. Proposed types are in PascalCase
+3. Agent distinguishes entities from properties (no numeric/quantitative types)
+4. Agent handles disambiguation (e.g., "Assembly" as component vs process)
 5. Each proposed type has clear relevance to user's goal
-6. Agent iterates based on user feedback
-7. Final list supports meaningful knowledge extraction
+6. Agent explains each type with well-known/discovered classification and text examples
+7. Agent iterates based on user feedback
+8. Final list supports meaningful knowledge extraction
 
 ## Common Issues
 
-1. **Including quantities as entities** - "Rating", "Price", "Count" should be properties, not entities. Add explicit instruction.
+1. **Including quantities as entities** - "Rating", "Price", "Count" should be properties, not entities. The prompt includes explicit guidance and examples.
 
-2. **Confusing "Assembly" process with "Assembly" component** - The word appears in both domain (component) and text (process of assembling). Clarify in instructions.
+2. **Confusing "Assembly" process with "Assembly" component** - The word appears in both domain (component) and text (process of assembling). The prompt includes disambiguation guidance.
 
-3. **Too many discovered types** - Focus on types that support the stated goal. Fewer is better.
+3. **Too many discovered types** - Focus on types that support the stated goal. Prompt limits to 3-6 types.
 
-4. **Missing well-known types** - Agent should always include well-known types that appear in the text.
+4. **Missing well-known types** - Agent should always include well-known types that appear in the text. Prompt says "ALWAYS include these".
