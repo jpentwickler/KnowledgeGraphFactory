@@ -55,6 +55,9 @@ async def run_agent(
         "content": message
     })
 
+    # Accumulate text blocks from all loop iterations (intermediate + final)
+    all_text_blocks = []
+
     # Agent loop: continue until we get a text response (not tool_use)
     while True:
         # Build request parameters
@@ -76,6 +79,11 @@ async def run_agent(
             "role": "assistant",
             "content": response.content
         })
+
+        # Collect any text blocks from this response
+        for block in response.content:
+            if hasattr(block, 'text') and block.text.strip():
+                all_text_blocks.append(block.text)
 
         # Check if we're done (no more tool calls)
         if response.stop_reason != "tool_use":
@@ -106,11 +114,8 @@ async def run_agent(
             "content": tool_results
         })
 
-    # Extract final text response
-    final_response = ""
-    for block in response.content:
-        if hasattr(block, 'text'):
-            final_response += block.text
+    # Join all text blocks from every iteration
+    final_response = "\n\n".join(all_text_blocks) if all_text_blocks else ""
 
     return final_response, state, conversation
 
@@ -149,6 +154,9 @@ def run_agent_sync(
         "content": message
     })
 
+    # Accumulate text blocks from all loop iterations (intermediate + final)
+    all_text_blocks = []
+
     # Agent loop: continue until we get a text response (not tool_use)
     turn_count = 0
     while turn_count < max_turns:
@@ -173,6 +181,11 @@ def run_agent_sync(
             "role": "assistant",
             "content": response.content
         })
+
+        # Collect any text blocks from this response
+        for block in response.content:
+            if hasattr(block, 'text') and block.text.strip():
+                all_text_blocks.append(block.text)
 
         # Check if we're done (no more tool calls)
         if response.stop_reason != "tool_use":
@@ -207,11 +220,8 @@ def run_agent_sync(
     if turn_count >= max_turns:
         print(f"WARNING: Agent reached max_turns limit ({max_turns}). Forcing exit.")
 
-    # Extract final text response
-    final_response = ""
-    for block in response.content:
-        if hasattr(block, 'text'):
-            final_response += block.text
+    # Join all text blocks from every iteration
+    final_response = "\n\n".join(all_text_blocks) if all_text_blocks else ""
 
     # If no text response due to max_turns, return a warning message
     if not final_response and turn_count >= max_turns:

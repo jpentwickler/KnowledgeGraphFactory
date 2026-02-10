@@ -610,10 +610,10 @@ def handle_submit_review(state: dict, verdict: str, problems: list) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def build_file_context(state: dict) -> str:
+def build_file_context(state: dict, scope: str = "all") -> str:
     """Pre-compute file context from approved files for injection into system prompts.
 
-    Reads all approved CSV and markdown files and returns a formatted string
+    Reads approved CSV and/or markdown files and returns a formatted string
     with headers, sample rows, and row counts. This eliminates the need for
     agents to make sample_file/search_file tool calls.
 
@@ -623,6 +623,8 @@ def build_file_context(state: dict) -> str:
 
     Args:
         state: Current state dictionary (must contain approved_files).
+        scope: Which file types to include. "all" (default) includes both
+            structured and unstructured. "structured" includes only CSV files.
 
     Returns:
         Formatted string with file context, or empty string if no approved files.
@@ -637,6 +639,9 @@ def build_file_context(state: dict) -> str:
     unstructured = approved.get("unstructured", [])
 
     sections = []
+
+    if scope not in ("all", "structured"):
+        return ""
 
     for file_entry in structured:
         path = file_entry["path"]
@@ -676,31 +681,32 @@ def build_file_context(state: dict) -> str:
         except Exception as exc:
             sections.append(f"=== {path} ===\n[ERROR: {exc}]\n")
 
-    for file_entry in unstructured:
-        path = file_entry["path"]
-        abs_path = os.path.join(data_dir, path)
-        abs_path = os.path.abspath(abs_path)
+    if scope == "all":
+        for file_entry in unstructured:
+            path = file_entry["path"]
+            abs_path = os.path.join(data_dir, path)
+            abs_path = os.path.abspath(abs_path)
 
-        if not os.path.isfile(abs_path):
-            sections.append(f"=== {path} ===\n[ERROR: File not found]\n")
-            continue
+            if not os.path.isfile(abs_path):
+                sections.append(f"=== {path} ===\n[ERROR: File not found]\n")
+                continue
 
-        try:
-            with open(abs_path, "r", encoding="utf-8") as f:
-                preview_lines = []
-                for i, line in enumerate(f):
-                    if i >= 20:
-                        break
-                    preview_lines.append(line.rstrip("\n"))
+            try:
+                with open(abs_path, "r", encoding="utf-8") as f:
+                    preview_lines = []
+                    for i, line in enumerate(f):
+                        if i >= 20:
+                            break
+                        preview_lines.append(line.rstrip("\n"))
 
-            lines = [
-                f"=== {path} ===",
-                f"Preview (first 20 lines):",
-            ]
-            lines.extend(preview_lines)
-            sections.append("\n".join(lines) + "\n")
+                lines = [
+                    f"=== {path} ===",
+                    f"Preview (first 20 lines):",
+                ]
+                lines.extend(preview_lines)
+                sections.append("\n".join(lines) + "\n")
 
-        except Exception as exc:
-            sections.append(f"=== {path} ===\n[ERROR: {exc}]\n")
+            except Exception as exc:
+                sections.append(f"=== {path} ===\n[ERROR: {exc}]\n")
 
     return "\n".join(sections)

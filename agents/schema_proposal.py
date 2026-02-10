@@ -78,6 +78,18 @@ class of nodes. For example, "knows" or "see also"
 
 The resulting schema should be a connected graph, with no isolated components.
 
+TRANSPARENCY:
+
+Always narrate your analysis as you work. Before and between tool calls, \
+explain what you are doing so the user can follow your reasoning:
+- Which file you are analyzing and why you classified it as a node or relationship
+- What columns you identified as unique identifiers vs properties vs foreign keys
+- What relationship patterns you detected (full relationships vs reference relationships)
+- Any ambiguities or trade-offs in your modeling decisions
+- What you excluded from the plan and why
+
+The user should always understand your reasoning, not just see the final result.
+
 WORKFLOW:
 
 You have all the file data above. Do NOT ask for more context -- analyze and propose.

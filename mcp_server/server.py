@@ -22,6 +22,7 @@ from agents import (
     FileSuggestionAgent,
     SchemaProposalAgent,
     SchemaCriticAgent,
+    NerExtractionAgent,
 )
 from core import load_state, save_state
 
@@ -68,6 +69,7 @@ _CONVERSATION_KEYS = [
     "_user_intent_conversation",
     "_file_suggestion_conversation",
     "_schema_proposal_conversation",
+    "_ner_extraction_conversation",
     "_conversation_history",  # legacy (US002 backward compat)
 ]
 
@@ -300,29 +302,55 @@ def kg_schema_proposal(message: str) -> dict:
 
 
 @mcp.tool
-def kg_schema_validate() -> dict:
-    """Validate the current proposed construction plan using a critic agent.
+def kg_critic(scope: str = "structured") -> dict:
+    """Run the critic agent to review proposed artifacts for problems.
 
-    Runs an independent validation of the proposed schema against the source
-    data. Returns a verdict ("valid" or "retry") with a list of problems.
+    The critic is an independent reviewer that checks for errors, missing
+    elements, and inconsistencies. It does NOT approve or finalize anything.
 
-    No message needed -- the critic analyzes the current proposed plan.
-    Call kg_schema_proposal to fix any issues found, then validate again.
+    Two scopes are available:
+    - "structured" (default): Reviews the construction plan against CSV files.
+      Use after kg_schema_proposal to check column references, identifier
+      uniqueness, and relationship correctness.
+    - "unstructured": Reviews entity types and fact types against markdown files.
+      Use after kg_ner_extraction or kg_fact_extraction to check text grounding,
+      overlapping types, and predicate quality.
+
+    No message needed -- the critic analyzes whatever is currently proposed.
+
+    Args:
+        scope: What to review. "structured" or "unstructured".
 
     Returns:
         Dictionary with critic verdict, problems list, and response text.
     """
     state, _ = load_session("_schema_proposal_conversation")
 
-    if "proposed_construction_plan" not in state:
+    if scope == "structured":
+        if "proposed_construction_plan" not in state:
+            return {
+                "agent_response": "No proposed construction plan to review. "
+                "Use kg_schema_proposal first to create a plan.",
+                "status": {"error": "no_proposed_plan"},
+            }
+    elif scope == "unstructured":
+        has_entities = (
+            "proposed_entity_types" in state or "approved_entity_types" in state
+        )
+        if not has_entities:
+            return {
+                "agent_response": "No entity types to review. "
+                "Use kg_ner_extraction first to propose entity types.",
+                "status": {"error": "no_entity_types"},
+            }
+    else:
         return {
-            "agent_response": "No proposed construction plan to validate. "
-            "Use kg_schema_proposal first to create a plan.",
-            "status": {"error": "no_proposed_plan"},
+            "agent_response": f"Invalid scope: '{scope}'. Use 'structured' or 'unstructured'.",
+            "status": {"error": "invalid_scope"},
         }
 
     critic = SchemaCriticAgent()
-    response, state = critic.run(state)
+    response, state = critic.run(state, scope=scope)
 
     # Save updated state (critic writes _critic_verdict/_critic_problems)
     save_session(state, None, "_schema_proposal_conversation")
@@ -333,10 +361,69 @@ def kg_schema_validate() -> dict:
     return {
         "agent_response": response,
         "status": {
+            "scope": scope,
             "verdict": verdict,
             "problems": problems,
             "problem_count": len(problems),
         },
+    }
+
+
+@mcp.tool
+def kg_ner_extraction(message: str) -> dict:
+    """Send a message to the NER Extraction Agent.
+
+    The agent analyzes approved markdown files and proposes entity types
+    (categories) to extract. Entity types include well-known types from
+    the construction plan and discovered types from the text.
+
+    Pass the user's message exactly as they wrote it. Multi-turn conversation.
+    Call once per user message. Stages 1-3 must be completed first.
+
+    Args:
+        message: The user's message, passed through exactly as written.
+
+    Returns:
+        Dictionary with agent response, status, and pre-computation summary.
+    """
+    state, conversation = load_session("_ner_extraction_conversation")
+
+    agent = NerExtractionAgent()
+    response, state, conversation = agent.run(message, state, conversation)
+
+    save_session(state, conversation, "_ner_extraction_conversation")
+
+    # Build status info
+    status = {
+        "has_proposed_entities": "proposed_entity_types" in state,
+        "has_approved_entities": "approved_entity_types" in state,
+    }
+
+    if "proposed_entity_types" in state:
+        status["proposed_entities"] = state["proposed_entity_types"]
+        status["entity_count"] = len(state["proposed_entity_types"])
+
+    if "approved_entity_types" in state:
+        status["approved_entities"] = state["approved_entity_types"]
+
+    # Pre-computation summary for transparency
+    unstructured = state.get("approved_files", {}).get("unstructured", [])
+    construction_plan = state.get("approved_construction_plan", {})
+    well_known = [
+        entry["label"]
+        for entry in construction_plan.values()
+        if entry.get("construction_type") == "node"
+    ]
+
+    status["pre_computation_summary"] = {
+        "files_analyzed": len(unstructured),
+        "file_names": [f["path"] for f in unstructured],
+        "well_known_types": well_known,
+    }
+
+    return {
+        "agent_response": response,
+        "status": status,
     }
 
 
