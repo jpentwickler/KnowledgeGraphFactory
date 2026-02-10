@@ -20,6 +20,7 @@ from tools.schema_tools import (
     handle_get_proposed_construction_plan,
     handle_approve_proposed_construction_plan,
     handle_submit_review,
+    build_file_context,
 )
 
 
@@ -391,6 +392,53 @@ def test_submit_review_retry():
 
 
 # ---------------------------------------------------------------------------
+# Tests: build_file_context
+# ---------------------------------------------------------------------------
+
+def test_build_file_context_no_approved_files():
+    state = {}
+    result = build_file_context(state)
+    assert result == ""
+    print("[OK] test_build_file_context_no_approved_files")
+
+
+def test_build_file_context_with_files():
+    state = {
+        "approved_files": {
+            "structured": [
+                {"path": "products.csv", "reason": "Product data"},
+                {"path": "suppliers.csv", "reason": "Supplier data"},
+            ],
+            "unstructured": [],
+        }
+    }
+    result = build_file_context(state)
+    assert "=== products.csv ===" in result
+    assert "=== suppliers.csv ===" in result
+    assert "Columns:" in result
+    assert "product_id" in result
+    assert "supplier_id" in result
+    assert "Row count:" in result
+    assert "Sample rows" in result
+    print("[OK] test_build_file_context_with_files")
+
+
+def test_build_file_context_missing_file():
+    state = {
+        "approved_files": {
+            "structured": [
+                {"path": "nonexistent_file.csv", "reason": "Does not exist"},
+            ],
+            "unstructured": [],
+        }
+    }
+    result = build_file_context(state)
+    assert "=== nonexistent_file.csv ===" in result
+    assert "[ERROR: File not found]" in result
+    print("[OK] test_build_file_context_missing_file")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -435,6 +483,11 @@ if __name__ == "__main__":
         # submit_review
         test_submit_review_valid()
         test_submit_review_retry()
+
+        # build_file_context
+        test_build_file_context_no_approved_files()
+        test_build_file_context_with_files()
+        test_build_file_context_missing_file()
 
         print("\n" + "=" * 50)
         print("ALL UNIT TESTS PASSED [OK]")

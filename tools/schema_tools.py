@@ -8,6 +8,7 @@ Provides tools for:
 - Approving the final construction plan
 """
 
+import csv
 import os
 
 from core import (
@@ -198,28 +199,6 @@ TOOL_SUBMIT_REVIEW = create_tool_schema(
         },
     },
     required=["verdict", "problems"],
-)
-
-# Coordinator-only tool: wraps the refinement loop
-TOOL_RUN_REFINEMENT_LOOP = create_tool_schema(
-    name="run_refinement_loop",
-    description=(
-        "Run the schema proposal refinement loop. "
-        "This analyzes approved files and proposes a construction plan, "
-        "then validates it with a critic agent. "
-        "The result is stored in the proposed construction plan. "
-        "Call this to generate or regenerate the schema proposal."
-    ),
-    properties={
-        "user_feedback": {
-            "type": "string",
-            "description": (
-                "Optional feedback from the user about what to change. "
-                "This will be included in the refinement process."
-            ),
-        },
-    },
-    required=[],
 )
 
 
@@ -626,36 +605,102 @@ def handle_submit_review(state: dict, verdict: str, problems: list) -> dict:
     }
 
 
-def handle_run_refinement_loop(state: dict, user_feedback: str = "") -> dict:
-    """Run the schema proposal refinement loop.
+# ---------------------------------------------------------------------------
+# Context Builder (for interactive agents)
+# ---------------------------------------------------------------------------
 
-    This is a tool handler that wraps the pipeline function,
-    callable as a tool by the coordinator agent.
+
+def build_file_context(state: dict) -> str:
+    """Pre-compute file context from approved files for injection into system prompts.
+
+    Reads all approved CSV and markdown files and returns a formatted string
+    with headers, sample rows, and row counts. This eliminates the need for
+    agents to make sample_file/search_file tool calls.
+
+    For CSV files: reads header + first 5 data rows + counts total rows.
+    For markdown files: reads first 20 lines as preview.
+    Handles missing files gracefully (error note, no crash).
 
     Args:
-        state: Current state dictionary (mutated in place).
-        user_feedback: Optional feedback from the user.
+        state: Current state dictionary (must contain approved_files).
 
     Returns:
-        Tool result with summary and counts.
+        Formatted string with file context, or empty string if no approved files.
     """
-    # Import here to avoid circular imports
-    from pipelines.schema_loop import run_refinement_loop
+    if not has_approved(state, "files"):
+        return ""
 
-    # If user provided feedback, prepend it to existing feedback
-    if user_feedback:
-        existing = state.get("feedback", "")
-        state["feedback"] = f"{user_feedback}\n{existing}".strip()
+    approved = get_approved(state, "files")
+    data_dir = _get_data_dir()
 
-    summary, _ = run_refinement_loop(state)
+    structured = approved.get("structured", [])
+    unstructured = approved.get("unstructured", [])
 
-    plan = state.get("proposed_construction_plan", {})
-    node_count = sum(1 for v in plan.values() if v.get("construction_type") == "node")
-    rel_count = sum(1 for v in plan.values() if v.get("construction_type") == "relationship")
+    sections = []
 
-    return {
-        "status": "success",
-        "message": summary,
-        "node_count": node_count,
-        "relationship_count": rel_count,
-    }
+    for file_entry in structured:
+        path = file_entry["path"]
+        abs_path = os.path.join(data_dir, path)
+        abs_path = os.path.abspath(abs_path)
+
+        if not os.path.isfile(abs_path):
+            sections.append(f"=== {path} ===\n[ERROR: File not found]\n")
+            continue
+
+        try:
+            with open(abs_path, "r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                rows = list(reader)
+
+            if not rows:
+                sections.append(f"=== {path} ===\n[Empty file]\n")
+                continue
+
+            header = rows[0]
+            data_rows = rows[1:]
+            sample_rows = data_rows[:5]
+
+            lines = [
+                f"=== {path} ===",
+                f"Columns: {', '.join(header)}",
+                f"Row count: {len(data_rows)}",
+            ]
+
+            if sample_rows:
+                lines.append("Sample rows (first 5):")
+                for row in sample_rows:
+                    lines.append(",".join(row))
+
+            sections.append("\n".join(lines) + "\n")
+
+        except Exception as exc:
+            sections.append(f"=== {path} ===\n[ERROR: {exc}]\n")
+
+    for file_entry in unstructured:
+        path = file_entry["path"]
+        abs_path = os.path.join(data_dir, path)
+        abs_path = os.path.abspath(abs_path)
+
+        if not os.path.isfile(abs_path):
+            sections.append(f"=== {path} ===\n[ERROR: File not found]\n")
+            continue
+
+        try:
+            with open(abs_path, "r", encoding="utf-8") as f:
+                preview_lines = []
+                for i, line in enumerate(f):
+                    if i >= 20:
+                        break
+                    preview_lines.append(line.rstrip("\n"))
+
+            lines = [
+                f"=== {path} ===",
+                f"Preview (first 20 lines):",
+            ]
+            lines.extend(preview_lines)
+            sections.append("\n".join(lines) + "\n")
+
+        except Exception as exc:
+            sections.append(f"=== {path} ===\n[ERROR: {exc}]\n")
+
+    return "\n".join(sections)

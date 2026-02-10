@@ -4,6 +4,7 @@ Provides load/save operations for state persistence and get/set operations
 for managing proposed and approved artifacts.
 """
 
+import copy
 import json
 from pathlib import Path
 from typing import Any
@@ -93,7 +94,7 @@ def approve(state: dict, key: str) -> None:
     if proposed_key not in state:
         raise KeyError(f"No proposed artifact found for key: {key}")
 
-    state[f"approved_{key}"] = state[proposed_key]
+    state[f"approved_{key}"] = copy.deepcopy(state[proposed_key])
 
 
 def has_approved(state: dict, key: str) -> bool:

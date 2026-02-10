@@ -32,7 +32,6 @@ from tools.schema_tools import (
     TOOL_GET_PROPOSED_CONSTRUCTION_PLAN,
     TOOL_APPROVE_PROPOSED_CONSTRUCTION_PLAN,
     TOOL_SUBMIT_REVIEW,
-    TOOL_RUN_REFINEMENT_LOOP,
     handle_get_approved_files,
     handle_search_file,
     handle_propose_node_construction,
@@ -42,7 +41,7 @@ from tools.schema_tools import (
     handle_get_proposed_construction_plan,
     handle_approve_proposed_construction_plan,
     handle_submit_review,
-    handle_run_refinement_loop,
+    build_file_context,
 )
 
 __all__ = [
@@ -74,7 +73,6 @@ __all__ = [
     "TOOL_GET_PROPOSED_CONSTRUCTION_PLAN",
     "TOOL_APPROVE_PROPOSED_CONSTRUCTION_PLAN",
     "TOOL_SUBMIT_REVIEW",
-    "TOOL_RUN_REFINEMENT_LOOP",
     "handle_get_approved_files",
     "handle_search_file",
     "handle_propose_node_construction",
@@ -84,5 +82,5 @@ __all__ = [
     "handle_get_proposed_construction_plan",
     "handle_approve_proposed_construction_plan",
     "handle_submit_review",
-    "handle_run_refinement_loop",
+    "build_file_context",
 ]

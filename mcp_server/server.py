@@ -17,7 +17,12 @@ load_dotenv(os.path.join(_root_dir, ".env"))
 
 from fastmcp import FastMCP
 
-from agents import UserIntentAgent, FileSuggestionAgent, SchemaProposalCoordinator
+from agents import (
+    UserIntentAgent,
+    FileSuggestionAgent,
+    SchemaProposalAgent,
+    SchemaCriticAgent,
+)
 from core import load_state, save_state
 
 
@@ -244,10 +249,10 @@ def kg_file_suggestion(message: str) -> dict:
 
 @mcp.tool
 def kg_schema_proposal(message: str) -> dict:
-    """Send a message to the Schema Proposal Coordinator.
+    """Send a message to the Schema Proposal Agent.
 
     Pass the user's message exactly as they wrote it. Do NOT add context,
-    file contents, or analysis -- the agent will ask its own questions.
+    file contents, or analysis -- the agent has all file data pre-loaded.
 
     This is a multi-turn conversation. Call this tool once per user message.
     Stages 1 (User Intent) and 2 (File Suggestion) must be completed first.
@@ -260,8 +265,8 @@ def kg_schema_proposal(message: str) -> dict:
     """
     state, conversation = load_session("_schema_proposal_conversation")
 
-    coordinator = SchemaProposalCoordinator()
-    response, state, conversation = coordinator.run(message, state, conversation)
+    agent = SchemaProposalAgent()
+    response, state, conversation = agent.run(message, state, conversation)
 
     save_session(state, conversation, "_schema_proposal_conversation")
 
@@ -291,6 +296,47 @@ def kg_schema_proposal(message: str) -> dict:
     return {
         "agent_response": response,
         "status": status,
+    }
+
+
+@mcp.tool
+def kg_schema_validate() -> dict:
+    """Validate the current proposed construction plan using a critic agent.
+
+    Runs an independent validation of the proposed schema against the source
+    data. Returns a verdict ("valid" or "retry") with a list of problems.
+
+    No message needed -- the critic analyzes the current proposed plan.
+    Call kg_schema_proposal to fix any issues found, then validate again.
+
+    Returns:
+        Dictionary with critic verdict, problems list, and response text.
+    """
+    state, _ = load_session("_schema_proposal_conversation")
+
+    if "proposed_construction_plan" not in state:
+        return {
+            "agent_response": "No proposed construction plan to validate. "
+            "Use kg_schema_proposal first to create a plan.",
+            "status": {"error": "no_proposed_plan"},
+        }
+
+    critic = SchemaCriticAgent()
+    response, state = critic.run(state)
+
+    # Save updated state (critic writes _critic_verdict/_critic_problems)
+    save_session(state, None, "_schema_proposal_conversation")
+
+    verdict = state.get("_critic_verdict", "unknown")
+    problems = state.get("_critic_problems", [])
+
+    return {
+        "agent_response": response,
+        "status": {
+            "verdict": verdict,
+            "problems": problems,
+            "problem_count": len(problems),
+        },
     }
 
 

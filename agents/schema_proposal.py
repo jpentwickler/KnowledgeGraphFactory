@@ -1,46 +1,42 @@
 """Schema Proposal Agent — proposes node and relationship construction rules.
 
-Inner agent of the refinement loop. Analyzes approved CSV files and proposes
-a construction plan for the knowledge graph. Receives critic feedback
-injected into its system prompt via {feedback} placeholder.
+Conversational agent that analyzes approved CSV files and proposes a construction
+plan for the knowledge graph. Pre-computes file context (CSV headers, sample rows)
+and injects it into the system prompt, making it fast (1 API call for initial
+proposal instead of 20+).
 
-This agent has NO approval tool — only the coordinator can approve.
+Follows the same pattern as UserIntentAgent and FileSuggestionAgent.
 """
 
-from core import run_agent_sync
-from tools.file_tools import (
-    TOOL_GET_APPROVED_USER_GOAL,
-    TOOL_SAMPLE_FILE,
-    handle_get_approved_user_goal,
-    handle_sample_file,
-)
+from core import run_agent_sync, get_approved
 from tools.schema_tools import (
-    TOOL_GET_APPROVED_FILES,
-    TOOL_SEARCH_FILE,
-    TOOL_GET_PROPOSED_CONSTRUCTION_PLAN,
     TOOL_PROPOSE_NODE_CONSTRUCTION,
     TOOL_PROPOSE_RELATIONSHIP_CONSTRUCTION,
     TOOL_REMOVE_NODE_CONSTRUCTION,
     TOOL_REMOVE_RELATIONSHIP_CONSTRUCTION,
-    handle_get_approved_files,
-    handle_search_file,
-    handle_get_proposed_construction_plan,
+    TOOL_GET_PROPOSED_CONSTRUCTION_PLAN,
+    TOOL_APPROVE_PROPOSED_CONSTRUCTION_PLAN,
     handle_propose_node_construction,
     handle_propose_relationship_construction,
     handle_remove_node_construction,
     handle_remove_relationship_construction,
+    handle_get_proposed_construction_plan,
+    handle_approve_proposed_construction_plan,
+    build_file_context,
 )
 
 
 SYSTEM_PROMPT_TEMPLATE = """\
-You are an expert at knowledge graph modeling with property graphs. Propose an appropriate \
-schema by specifying construction rules which transform approved files into nodes or relationships. \
-The resulting schema should describe a knowledge graph based on the user goal.
+You are an expert at knowledge graph modeling with property graphs. Your job is to \
+propose a construction plan that transforms approved CSV files into graph nodes and \
+relationships, based on the user's goal.
 
-Consider feedback if it is available:
-<feedback>
-{feedback}
-</feedback>
+USER GOAL:
+- Kind: {user_goal_kind}
+- Description: {user_goal_description}
+
+APPROVED FILE DATA:
+{file_context}
 
 HINTS FOR NODE VS RELATIONSHIP DETECTION:
 
@@ -48,9 +44,6 @@ Every file in the approved files list will become either a node or a relationshi
 Determining whether a file likely represents a node or a relationship is based \
 on a hint from the filename (is it a single thing or two things) and the \
 identifiers found within the file.
-
-Because unique identifiers are so important for determining the structure of the graph, \
-always verify the uniqueness of suspected unique identifiers using the 'search_file' tool.
 
 General guidance for identifying a node or a relationship:
 - If the file name is singular and has only 1 unique identifier it is likely a node
@@ -85,65 +78,65 @@ class of nodes. For example, "knows" or "see also"
 
 The resulting schema should be a connected graph, with no isolated components.
 
-CHAIN OF THOUGHT DIRECTIONS:
+WORKFLOW:
 
-Prepare for the task:
-- get the user goal using the 'get_approved_user_goal' tool
-- get the list of approved files using the 'get_approved_files' tool
-- get the current construction plan using the 'get_proposed_construction_plan' tool
+You have all the file data above. Do NOT ask for more context -- analyze and propose.
 
-Think carefully, using tools to perform actions and reconsidering your actions when \
-a tool returns an error:
-1. For each approved file, consider whether it represents a node or relationship. \
-Check the content for potential unique identifiers using the 'sample_file' tool.
-2. For each identifier, verify that it is unique by using the 'search_file' tool.
-3. Use the node vs relationship guidance for deciding whether the file represents \
+1. Analyze each file's columns and sample data to determine whether it represents \
 a node or a relationship.
-4. For a node file, propose a node construction using the 'propose_node_construction' tool.
-5. If the node contains a reference relationship, use the 'propose_relationship_construction' \
-tool to propose a relationship construction.
-6. For a relationship file, propose a relationship construction using the \
-'propose_relationship_construction' tool.
-7. If you need to remove a construction, use the 'remove_node_construction' or \
-'remove_relationship_construction' tool.
-8. When you are done with construction proposals, use the 'get_proposed_construction_plan' \
-tool to present the plan to the user.\
+2. For each node file, call 'propose_node_construction' with the label, unique column, \
+and properties.
+3. For each relationship (full or reference), call 'propose_relationship_construction' \
+with the relationship type, source/target labels and columns.
+4. After proposing all constructions, call 'get_proposed_construction_plan' and present \
+the complete plan to the user.
+5. If the user requests changes, use remove/propose tools to update the proposed plan. \
+After making changes, call 'get_proposed_construction_plan' to show the updated plan. \
+If the plan was previously approved, you MUST call 'approve_proposed_construction_plan' \
+again after the user confirms the changes.
+6. ONLY call 'approve_proposed_construction_plan' when the user explicitly approves \
+(says "approve", "looks good", "yes", etc.).
+
+MOVE-ON RULE:
+- Whenever you ask clarifying questions, end with a reminder like:
+  "Or say 'move on' if you'd like me to proceed with what I have so far."
+- When the user says "move on", "skip", "proceed", "that's enough", or similar:
+  STOP asking questions or explaining further.
+  Immediately propose the best schema you can based on available information.
+  Call the propose tools, then get_proposed_construction_plan, and present it for approval.
+- The user can still refine or reject the proposal.
+
+Be concise and professional. Present the plan clearly so the user can review it.\
 """
 
-
 TOOLS = [
-    TOOL_GET_APPROVED_USER_GOAL,
-    TOOL_GET_APPROVED_FILES,
-    TOOL_GET_PROPOSED_CONSTRUCTION_PLAN,
-    TOOL_SAMPLE_FILE,
-    TOOL_SEARCH_FILE,
     TOOL_PROPOSE_NODE_CONSTRUCTION,
     TOOL_PROPOSE_RELATIONSHIP_CONSTRUCTION,
     TOOL_REMOVE_NODE_CONSTRUCTION,
     TOOL_REMOVE_RELATIONSHIP_CONSTRUCTION,
+    TOOL_GET_PROPOSED_CONSTRUCTION_PLAN,
+    TOOL_APPROVE_PROPOSED_CONSTRUCTION_PLAN,
 ]
 
 TOOL_HANDLERS = {
-    "get_approved_user_goal": handle_get_approved_user_goal,
-    "get_approved_files": handle_get_approved_files,
-    "get_proposed_construction_plan": handle_get_proposed_construction_plan,
-    "sample_file": handle_sample_file,
-    "search_file": handle_search_file,
     "propose_node_construction": handle_propose_node_construction,
     "propose_relationship_construction": handle_propose_relationship_construction,
     "remove_node_construction": handle_remove_node_construction,
     "remove_relationship_construction": handle_remove_relationship_construction,
+    "get_proposed_construction_plan": handle_get_proposed_construction_plan,
+    "approve_proposed_construction_plan": handle_approve_proposed_construction_plan,
 }
 
 
 class SchemaProposalAgent:
-    """Inner agent that proposes graph schema constructions.
+    """Conversational schema proposal agent.
 
-    This agent does NOT have an approval tool. It only proposes node
-    and relationship construction rules. The coordinator handles approval.
+    Pre-computes file context (CSV headers, sample rows) and injects it into
+    the system prompt, eliminating the need for sample_file/search_file tool
+    calls. This makes the agent fast (~1 API call for initial proposal instead
+    of 20+).
 
-    Feedback from the critic is injected into the system prompt via
-    the {feedback} placeholder.
+    Follows the same pattern as UserIntentAgent and FileSuggestionAgent.
     """
 
     def __init__(self):
@@ -155,17 +148,30 @@ class SchemaProposalAgent:
     ) -> tuple[str, dict, list]:
         """Run a conversation turn with the proposal agent.
 
+        On the first call, pre-computes file context and injects it into
+        the system prompt along with the user goal.
+
         Args:
-            message: User or orchestrator message.
-            state: Current state dictionary (contains feedback from critic).
+            message: User message.
+            state: Current state dictionary.
             conversation: Conversation history (None for fresh start).
 
         Returns:
             (response, updated_state, conversation)
         """
-        # Inject feedback into system prompt
-        feedback = state.get("feedback", "")
-        system_prompt = SYSTEM_PROMPT_TEMPLATE.format(feedback=feedback)
+        # Extract user goal for prompt injection
+        user_goal = get_approved(state, "user_goal") or {}
+        user_goal_kind = user_goal.get("kind_of_graph", "unknown")
+        user_goal_description = user_goal.get("graph_description", "No description available.")
+
+        # Pre-compute file context
+        file_context = build_file_context(state) or "No approved files found."
+
+        system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
+            user_goal_kind=user_goal_kind,
+            user_goal_description=user_goal_description,
+            file_context=file_context,
+        )
 
         return run_agent_sync(
             message=message,

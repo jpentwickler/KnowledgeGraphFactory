@@ -133,7 +133,6 @@ kg-factory/
 │
 ├── pipelines/             # Multi-agent workflows
 │   ├── __init__.py
-│   ├── schema_loop.py     # Proposal → Critic loop
 │   └── full_pipeline.py   # End-to-end orchestration
 │
 ├── tests/                 # Interactive tests

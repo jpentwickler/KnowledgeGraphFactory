@@ -1,13 +1,13 @@
-"""Interactive test for Schema Proposal Coordinator.
+"""Interactive test for Interactive Schema Proposal Agent.
 
 Usage:
     python -m tests.test_03_schema_proposal
 
 Commands:
-    - Type your message normally to chat with the coordinator
+    - Type your message normally to chat with the agent
     - 'state' - Show current state (without conversation history)
     - 'plan'  - Show just the proposed construction plan
-    - 'trace' - Show the refinement loop trace
+    - 'validate' - Run the critic agent to validate the current plan
     - 'quit'  - Exit
 """
 
@@ -22,13 +22,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from dotenv import load_dotenv
 load_dotenv()
 
-from agents import SchemaProposalCoordinator
+from agents import SchemaProposalAgent, SchemaCriticAgent
 from core import load_state, save_state
 
 
 def main():
-    """Run interactive test for the Schema Proposal Coordinator."""
-    coordinator = SchemaProposalCoordinator()
+    """Run interactive test for the Interactive Schema Proposal Agent."""
+    agent = SchemaProposalAgent()
     conversation = None
 
     # Try to load state from previous stage output
@@ -72,10 +72,10 @@ def main():
         os.environ["KG_DATA_DIR"] = os.path.abspath(data_dir)
 
     print("=" * 70)
-    print("SCHEMA PROPOSAL COORDINATOR - Interactive Test")
+    print("INTERACTIVE SCHEMA PROPOSAL AGENT - Interactive Test")
     print("=" * 70)
     print(f"Data directory: {os.environ.get('KG_DATA_DIR')}")
-    print("Commands: 'state', 'plan', 'trace', 'quit'")
+    print("Commands: 'state', 'plan', 'validate', 'quit'")
     print("=" * 70)
 
     while True:
@@ -104,23 +104,24 @@ def main():
                 print(json.dumps(plan, indent=2))
             continue
 
-        if user_input.lower() == "trace":
-            trace = state.get("_refinement_trace", [])
-            if not trace:
-                print("No refinement trace yet.")
-            else:
-                for entry in trace:
-                    print(f"\n--- Iteration {entry['iteration']} ---")
-                    print(f"Verdict: {entry['critic_verdict']}")
-                    if entry["critic_problems"]:
-                        print("Problems:")
-                        for p in entry["critic_problems"]:
-                            print(f"  - {p}")
-                    print(f"Critic: {entry['critic_response'][:300]}...")
+        if user_input.lower() == "validate":
+            if "proposed_construction_plan" not in state:
+                print("No proposed construction plan to validate.")
+                continue
+            print("\n[Validating with critic agent...]")
+            critic = SchemaCriticAgent()
+            critic_response, state = critic.run(state)
+            print(f"\nCritic: {critic_response}")
+            verdict = state.get("_critic_verdict", "unknown")
+            problems = state.get("_critic_problems", [])
+            print(f"\nVerdict: {verdict}")
+            if problems:
+                print("Problems:")
+                for p in problems:
+                    print(f"  - {p}")
             continue
 
-        print("\n[Processing... this may take a minute for the refinement loop]")
-        response, state, conversation = coordinator.run(
+        response, state, conversation = agent.run(
             user_input, state, conversation
         )
         print(f"\nAgent: {response}")

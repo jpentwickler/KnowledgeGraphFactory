@@ -2,6 +2,12 @@
 
 from agents.user_intent import UserIntentAgent
 from agents.file_suggestion import FileSuggestionAgent
-from agents.schema_coordinator import SchemaProposalCoordinator
+from agents.schema_proposal import SchemaProposalAgent
+from agents.schema_critic import SchemaCriticAgent
 
-__all__ = ["UserIntentAgent", "FileSuggestionAgent", "SchemaProposalCoordinator"]
+__all__ = [
+    "UserIntentAgent",
+    "FileSuggestionAgent",
+    "SchemaProposalAgent",
+    "SchemaCriticAgent",
+]
