@@ -523,6 +523,238 @@ def kg_fact_extraction(message: str) -> dict:
     }
 
 
+def _format_node_results(nodes: list[dict]) -> str:
+    """Format node import results for display."""
+    if not nodes:
+        return "  (none)"
+
+    lines = []
+    for node in nodes:
+        status = "[OK]" if not node["errors"] else "[FAIL]"
+        lines.append(f"  {status} {node['label']}: {node['count']} nodes")
+        for error in node.get("errors", []):
+            lines.append(f"      Error: {error}")
+    return "\n".join(lines)
+
+
+def _format_rel_results(rels: list[dict]) -> str:
+    """Format relationship import results for display."""
+    if not rels:
+        return "  (none)"
+
+    lines = []
+    for rel in rels:
+        status = "[OK]" if not rel["errors"] else "[FAIL]"
+        orphan_note = ""
+        if rel.get("orphans", 0) > 0:
+            orphan_note = f" (WARNING: {rel['orphans']} orphans)"
+        lines.append(f"  {status} {rel['type']}: {rel['count']} relationships{orphan_note}")
+        for error in rel.get("errors", []):
+            lines.append(f"      Error: {error}")
+    return "\n".join(lines)
+
+
+@mcp.tool
+def kg_build_graph(message: str = "build") -> dict:
+    """Build the knowledge graph in Neo4j from approved artifacts.
+
+    This tool executes the graph construction pipeline, importing structured
+    CSV data into Neo4j according to the approved construction plan.
+
+    The build process:
+    1. Validates all CSV files (duplicates, nulls, whitespace)
+    2. Creates NODE KEY constraints for uniqueness + indexing
+    3. Imports nodes via LOAD CSV + MERGE
+    4. Imports relationships via LOAD CSV + MATCH + MERGE
+    5. Verifies graph construction (node/relationship counts)
+
+    Prerequisites:
+    - Stage 3 must be completed (approved_construction_plan)
+    - Neo4j instance must be running and accessible
+    - Environment variables must be set (NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD)
+
+    Note: Currently builds the Domain Graph only (CSV → Neo4j).
+    Text processing (Subject/Lexical graphs) will be added in a future update.
+
+    Args:
+        message: Optional user message (e.g., "build the graph", "start")
+
+    Returns:
+        Dictionary with build results, verification stats, and any errors.
+    """
+    state = _load_clean_state()
+
+    # Check prerequisites
+    if "approved_construction_plan" not in state:
+        return {
+            "agent_response": (
+                "Cannot build graph: No approved construction plan found.\n\n"
+                "Please complete Stage 3 (Schema Proposal) first:\n"
+                "1. Use kg_schema_proposal to design the schema\n"
+                "2. Use kg_critic with scope='structured' to validate\n"
+                "3. Approve the construction plan"
+            ),
+            "status": {
+                "success": False,
+                "error": "missing_construction_plan"
+            }
+        }
+
+    # Check Neo4j environment variables
+    neo4j_uri = os.environ.get("NEO4J_URI")
+    neo4j_user = os.environ.get("NEO4J_USER")
+    neo4j_password = os.environ.get("NEO4J_PASSWORD")
+
+    if not all([neo4j_uri, neo4j_user, neo4j_password]):
+        return {
+            "agent_response": (
+                "Cannot build graph: Neo4j credentials not configured.\n\n"
+                "Please set these environment variables in your .mcp.json:\n"
+                "- NEO4J_URI (e.g., neo4j+s://xxxxx.databases.neo4j.io)\n"
+                "- NEO4J_USER (e.g., neo4j)\n"
+                "- NEO4J_PASSWORD (your password)"
+            ),
+            "status": {
+                "success": False,
+                "error": "missing_neo4j_credentials"
+            }
+        }
+
+    # Import domain builder
+    try:
+        from pipelines import build_domain_graph
+        from utils import get_neo4j_driver, test_connection, close_driver
+    except ImportError as exc:
+        return {
+            "agent_response": f"Failed to import graph builder modules: {exc}",
+            "status": {
+                "success": False,
+                "error": "import_error"
+            }
+        }
+
+    # Connect to Neo4j
+    try:
+        driver = get_neo4j_driver()
+        conn_info = test_connection(driver)
+        neo4j_version = conn_info.get("neo4j_version", "unknown")
+        database = conn_info.get("database", "neo4j")
+    except Exception as exc:
+        return {
+            "agent_response": (
+                f"Failed to connect to Neo4j: {exc}\n\n"
+                "Please check:\n"
+                "1. Neo4j instance is running\n"
+                "2. NEO4J_URI is correct\n"
+                "3. Credentials are valid\n"
+                "4. Network connectivity"
+            ),
+            "status": {
+                "success": False,
+                "error": "neo4j_connection_failed",
+                "details": str(exc)
+            }
+        }
+
+    # Build domain graph
+    try:
+        results = build_domain_graph(state, driver)
+
+        # Close Neo4j connection
+        close_driver(driver)
+
+        # Check for errors
+        if results["errors"]:
+            error_summary = "\n".join(f"  - {err}" for err in results["errors"])
+            response = f"""
+Graph build completed with errors:
+
+{error_summary}
+
+Please review the errors and fix any data issues before retrying.
+"""
+            return {
+                "agent_response": response,
+                "status": {
+                    "success": False,
+                    "errors": results["errors"],
+                    "verification": results.get("verification", {})
+                }
+            }
+
+        # Success!
+        verification = results["verification"]
+        response = f"""
+Domain Graph built successfully!
+
+Connected to Neo4j {neo4j_version} (database: {database})
+
+Nodes Imported:
+{_format_node_results(results['nodes'])}
+
+Relationships Imported:
+{_format_rel_results(results['relationships'])}
+
+Verification:
+  Total nodes: {verification['total_nodes']}
+  Total relationships: {verification['total_relationships']}
+  Orphan nodes (no relationships): {verification['orphan_nodes']}
+
+  Node counts by label:
+{chr(10).join(f"    {label}: {count}" for label, count in verification['node_counts'].items())}
+
+  Relationship counts by type:
+{chr(10).join(f"    {rel_type}: {count}" for rel_type, count in verification['relationship_counts'].items())}
+
+You can explore the graph in Neo4j Browser at: {neo4j_uri.replace('neo4j+s://', 'https://').replace('bolt://', 'http://').split(':')[0]}:7474
+
+Useful queries:
+  // View all nodes
+  MATCH (n) RETURN n LIMIT 25
+
+  // Check schema
+  CALL db.schema.visualization()
+
+  // Count all entities
+  MATCH (n) RETURN labels(n) as label, count(*) as count
+"""
+
+        return {
+            "agent_response": response,
+            "status": {
+                "success": True,
+                "neo4j_version": neo4j_version,
+                "database": database,
+                "verification": verification,
+                "node_import": results["nodes"],
+                "relationship_import": results["relationships"]
+            }
+        }
+
+    except Exception as exc:
+        # Make sure to close driver even on error
+        try:
+            close_driver(driver)
+        except:
+            pass
+
+        return {
+            "agent_response": (
+                f"Graph build failed with error:\n\n{exc}\n\n"
+                "This may be due to:\n"
+                "- Invalid CSV data (duplicates, missing values)\n"
+                "- Neo4j connection issues\n"
+                "- Permission problems\n\n"
+                "Check the error message above for details."
+            ),
+            "status": {
+                "success": False,
+                "error": "build_failed",
+                "details": str(exc)
+            }
+        }
+
+
 @mcp.tool
 def kg_reset_state() -> dict:
     """Reset the KG-Factory state to start fresh.

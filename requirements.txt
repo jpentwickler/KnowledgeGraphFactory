@@ -8,6 +8,9 @@ fastmcp<3
 # Neo4j (for Stage 6)
 neo4j>=5.0.0
 
+# Data validation (for Stage 6)
+pandas>=2.0.0
+
 # Optional: Neo4j GraphRAG for entity extraction (Stage 6)
 # neo4j-graphrag>=0.1.0
 
