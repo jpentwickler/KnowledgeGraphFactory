@@ -2,6 +2,10 @@
 
 Exposes KG-Factory agents as tools for Claude Code integration.
 Uses FastMCP for the MCP protocol implementation.
+
+Each agent maintains a rolling-window conversation history (last N messages)
+so that multi-turn interactions preserve context between MCP calls.
+All artifacts are persisted in state (proposed/approved values).
 """
 
 import os
@@ -23,6 +27,7 @@ from agents import (
     SchemaProposalAgent,
     SchemaCriticAgent,
     NerExtractionAgent,
+    FactExtractionAgent,
 )
 from core import load_state, save_state
 
@@ -64,95 +69,124 @@ STATE_FILE = os.path.join(
     "current_state.json"
 )
 
-# Keys used to store per-agent conversation histories inside the state file.
-_CONVERSATION_KEYS = [
-    "_user_intent_conversation",
-    "_file_suggestion_conversation",
-    "_schema_proposal_conversation",
-    "_ner_extraction_conversation",
-    "_conversation_history",  # legacy (US002 backward compat)
-]
+# Rolling window: max conversation messages stored per agent.
+# ~5 full exchanges (user + assistant + tool pairs).
+MAX_CONVERSATION_MESSAGES = 20
+
+_CONVERSATION_SUFFIX = "_conversation"
 
 
-def serialize_conversation(conversation: list) -> list:
-    """Convert conversation to JSON-serializable format.
+def _is_conversation_key(key: str) -> bool:
+    """Check if a state key is a conversation history key."""
+    return key.startswith("_") and key.endswith(_CONVERSATION_SUFFIX)
 
-    The conversation list may contain Anthropic SDK objects (ContentBlock)
-    that aren't directly JSON-serializable. This function converts them.
 
-    Args:
-        conversation: List of conversation messages.
+def _should_persist(key: str) -> bool:
+    """Check if a state key should be persisted to disk.
 
-    Returns:
-        JSON-serializable list of messages.
+    Artifact keys (no underscore prefix) and conversation keys are persisted.
+    Other underscore-prefixed keys (e.g. _critic_verdict) are ephemeral.
     """
-    if not conversation:
-        return None
+    return not key.startswith("_") or _is_conversation_key(key)
 
+
+def _serialize_conversation(conversation: list[dict]) -> list[dict]:
+    """Convert a conversation to a JSON-serializable format.
+
+    Assistant messages contain Anthropic SDK objects (TextBlock, ToolUseBlock)
+    which must be converted to dicts via model_dump(). User messages are
+    already JSON-safe (plain strings or tool_result dicts).
+    """
     serialized = []
     for msg in conversation:
-        if msg["role"] == "assistant":
-            content = []
-            for block in msg["content"]:
-                # Handle Anthropic SDK objects that have model_dump()
+        role = msg["role"]
+        content = msg["content"]
+
+        if role == "assistant" and isinstance(content, list):
+            serialized_content = []
+            for block in content:
                 if hasattr(block, "model_dump"):
-                    content.append(block.model_dump())
+                    serialized_content.append(block.model_dump())
                 else:
-                    content.append(block)
-            serialized.append({"role": "assistant", "content": content})
+                    serialized_content.append(block)
+            serialized.append({"role": role, "content": serialized_content})
         else:
             serialized.append(msg)
+
     return serialized
 
 
-def load_session(conversation_key: str) -> tuple[dict, list]:
-    """Load state and a specific agent's conversation from disk.
+def _trim_conversation(
+    conversation: list[dict],
+    max_messages: int = MAX_CONVERSATION_MESSAGES,
+) -> list[dict]:
+    """Trim a conversation to the last N messages, respecting tool-pair boundaries.
 
-    Args:
-        conversation_key: Key for the agent's conversation history
-            (e.g. "_user_intent_conversation").
+    After trimming to the last N messages, scans forward to find a clean
+    boundary -- a user message with plain string content (not a tool_result).
+    This prevents splitting tool_use/tool_result pairs which would crash the
+    Claude API.
+    """
+    if not conversation or len(conversation) <= max_messages:
+        return conversation
 
-    Returns:
-        Tuple of (state dict without conversation keys, conversation list).
-        Conversation may be None if no history exists.
+    start_idx = len(conversation) - max_messages
+
+    # Scan forward to a user message with plain string content
+    while start_idx < len(conversation):
+        msg = conversation[start_idx]
+        if msg["role"] == "user" and isinstance(msg["content"], str):
+            break
+        start_idx += 1
+
+    if start_idx >= len(conversation):
+        return []
+
+    return conversation[start_idx:]
+
+
+def _pop_conversation(state: dict, conv_key: str) -> list | None:
+    """Extract conversation from state for agent use."""
+    return state.pop(conv_key, None)
+
+
+def _store_conversation(
+    state: dict, conv_key: str, conversation: list
+) -> None:
+    """Serialize, trim, and store conversation back into state."""
+    conversation = _serialize_conversation(conversation)
+    conversation = _trim_conversation(conversation)
+    state[conv_key] = conversation
+
+
+def _load_clean_state() -> dict:
+    """Load state from disk, preserving artifacts and conversation keys.
+
+    Strips ephemeral underscore-prefixed keys (e.g. _critic_verdict)
+    but preserves conversation keys (e.g. _user_intent_conversation).
+    """
+    raw_state = load_state(STATE_FILE)
+    return {k: v for k, v in raw_state.items() if _should_persist(k)}
+
+
+def _save_state(state: dict) -> None:
+    """Save state to disk, preserving artifacts and conversation keys.
+
+    Merges updated state into the existing file so that keys not touched
+    by this agent call are preserved.
     """
     raw_state = load_state(STATE_FILE)
 
-    conversation = raw_state.get(conversation_key)
+    # Keep artifacts + conversation keys from existing state
+    clean_raw = {k: v for k, v in raw_state.items() if _should_persist(k)}
 
-    # Backward compat: legacy key for user intent
-    if conversation is None and conversation_key == "_user_intent_conversation":
-        conversation = raw_state.get("_conversation_history")
+    # Merge in updated state
+    clean_raw.update(state)
 
-    # Return clean state (no conversation keys)
-    state = {k: v for k, v in raw_state.items() if k not in _CONVERSATION_KEYS}
-    return state, conversation
+    # Final clean: remove any ephemeral keys that came from agent
+    final = {k: v for k, v in clean_raw.items() if _should_persist(k)}
 
-
-def save_session(state: dict, conversation: list, conversation_key: str) -> None:
-    """Save state and a specific agent's conversation to disk.
-
-    Merges the agent state into the existing raw state so that other agents'
-    conversation histories are preserved.
-
-    Args:
-        state: State dictionary to save (should not contain conversation keys).
-        conversation: Conversation history to save.
-        conversation_key: Key for the agent's conversation history.
-    """
-    raw_state = load_state(STATE_FILE)
-
-    # Update state keys (skip conversation keys coming from the agent state)
-    for k, v in state.items():
-        if k not in _CONVERSATION_KEYS:
-            raw_state[k] = v
-
-    # Save this agent's conversation
-    serialized = serialize_conversation(conversation)
-    if serialized:
-        raw_state[conversation_key] = serialized
-
-    save_state(raw_state, STATE_FILE)
+    save_state(final, STATE_FILE)
 
 
 @mcp.tool
@@ -165,9 +199,9 @@ def kg_get_state() -> dict:
     Returns:
         Dictionary with current state (excludes internal metadata).
     """
-    raw_state = load_state(STATE_FILE)
-    # Filter out internal keys (those starting with _)
-    return {k: v for k, v in raw_state.items() if not k.startswith("_")}
+    state = _load_clean_state()
+    # Exclude conversation keys from public display
+    return {k: v for k, v in state.items() if not _is_conversation_key(k)}
 
 
 @mcp.tool
@@ -185,12 +219,14 @@ def kg_user_intent(message: str) -> dict:
     Returns:
         Dictionary with agent response and current status.
     """
-    state, conversation = load_session("_user_intent_conversation")
+    state = _load_clean_state()
+    conversation = _pop_conversation(state, "_user_intent_conversation")
 
     agent = UserIntentAgent()
     response, state, conversation = agent.run(message, state, conversation)
 
-    save_session(state, conversation, "_user_intent_conversation")
+    _store_conversation(state, "_user_intent_conversation", conversation)
+    _save_state(state)
 
     # Build status info
     status = {
@@ -225,12 +261,14 @@ def kg_file_suggestion(message: str) -> dict:
     Returns:
         Dictionary with agent response and current status.
     """
-    state, conversation = load_session("_file_suggestion_conversation")
+    state = _load_clean_state()
+    conversation = _pop_conversation(state, "_file_suggestion_conversation")
 
     agent = FileSuggestionAgent()
     response, state, conversation = agent.run(message, state, conversation)
 
-    save_session(state, conversation, "_file_suggestion_conversation")
+    _store_conversation(state, "_file_suggestion_conversation", conversation)
+    _save_state(state)
 
     # Build status info
     status = {
@@ -265,12 +303,14 @@ def kg_schema_proposal(message: str) -> dict:
     Returns:
         Dictionary with agent response and current status.
     """
-    state, conversation = load_session("_schema_proposal_conversation")
+    state = _load_clean_state()
+    conversation = _pop_conversation(state, "_schema_proposal_conversation")
 
     agent = SchemaProposalAgent()
     response, state, conversation = agent.run(message, state, conversation)
 
-    save_session(state, conversation, "_schema_proposal_conversation")
+    _store_conversation(state, "_schema_proposal_conversation", conversation)
+    _save_state(state)
 
     # Build status info
     status = {
@@ -324,7 +364,7 @@ def kg_critic(scope: str = "structured") -> dict:
     Returns:
         Dictionary with critic verdict, problems list, and response text.
     """
-    state, _ = load_session("_schema_proposal_conversation")
+    state = _load_clean_state()
 
     if scope == "structured":
         if "proposed_construction_plan" not in state:
@@ -352,8 +392,7 @@ def kg_critic(scope: str = "structured") -> dict:
     critic = SchemaCriticAgent()
     response, state = critic.run(state, scope=scope)
 
-    # Save updated state (critic writes _critic_verdict/_critic_problems)
-    save_session(state, None, "_schema_proposal_conversation")
+    _save_state(state)
 
     verdict = state.get("_critic_verdict", "unknown")
     problems = state.get("_critic_problems", [])
@@ -386,12 +425,14 @@ def kg_ner_extraction(message: str) -> dict:
     Returns:
         Dictionary with agent response, status, and pre-computation summary.
     """
-    state, conversation = load_session("_ner_extraction_conversation")
+    state = _load_clean_state()
+    conversation = _pop_conversation(state, "_ner_extraction_conversation")
 
     agent = NerExtractionAgent()
     response, state, conversation = agent.run(message, state, conversation)
 
-    save_session(state, conversation, "_ner_extraction_conversation")
+    _store_conversation(state, "_ner_extraction_conversation", conversation)
+    _save_state(state)
 
     # Build status info
     status = {
@@ -428,10 +469,65 @@ def kg_ner_extraction(message: str) -> dict:
 
 
 @mcp.tool
+def kg_fact_extraction(message: str) -> dict:
+    """Send a message to the Fact Extraction Agent.
+
+    The agent analyzes approved markdown files and proposes fact types
+    (relationship templates) between approved entity types. Fact types
+    define directed relationships like (Product)-[has_issue]->(Issue).
+
+    Pass the user's message exactly as they wrote it. Multi-turn conversation.
+    Call once per user message. Stages 1-4 must be completed first.
+
+    Args:
+        message: The user's message, passed through exactly as written.
+
+    Returns:
+        Dictionary with agent response, status, and pre-computation summary.
+    """
+    state = _load_clean_state()
+    conversation = _pop_conversation(state, "_fact_extraction_conversation")
+
+    agent = FactExtractionAgent()
+    response, state, conversation = agent.run(message, state, conversation)
+
+    _store_conversation(state, "_fact_extraction_conversation", conversation)
+    _save_state(state)
+
+    # Build status info
+    status = {
+        "has_proposed_facts": "proposed_fact_types" in state,
+        "has_approved_facts": "approved_fact_types" in state,
+    }
+
+    if "proposed_fact_types" in state:
+        status["proposed_facts"] = state["proposed_fact_types"]
+        status["fact_count"] = len(state["proposed_fact_types"])
+
+    if "approved_fact_types" in state:
+        status["approved_facts"] = state["approved_fact_types"]
+
+    # Pre-computation summary for transparency
+    entity_types = state.get("approved_entity_types", {})
+    unstructured = state.get("approved_files", {}).get("unstructured", [])
+
+    status["pre_computation_summary"] = {
+        "files_analyzed": len(unstructured),
+        "file_names": [f["path"] for f in unstructured],
+        "entity_types_available": sorted(entity_types.keys()),
+    }
+
+    return {
+        "agent_response": response,
+        "status": status,
+    }
+
+
+@mcp.tool
 def kg_reset_state() -> dict:
     """Reset the KG-Factory state to start fresh.
 
-    Clears all proposed/approved artifacts and conversation history.
+    Clears all proposed/approved artifacts.
     Use this to start over from the beginning.
 
     Returns:

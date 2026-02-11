@@ -20,6 +20,7 @@ from tools.extraction_tools import (
     handle_search_files,
     build_markdown_context,
     build_well_known_types,
+    format_user_goal,
 )
 from tools.file_tools import TOOL_SAMPLE_FILE, handle_sample_file
 
@@ -172,23 +173,6 @@ or exclude the type.
    sample_file and reconsider your proposal based on what you find
 9. Only call approve_proposed_entities when the user explicitly approves
 """
-
-
-def format_user_goal(goal: dict) -> str:
-    """Format user goal dict into readable text.
-
-    Args:
-        goal: Dictionary with 'kind' and 'description' keys.
-
-    Returns:
-        Formatted string for prompt injection.
-    """
-    if not goal:
-        return "(No user goal found)"
-
-    kind = goal.get("kind", "Unknown")
-    description = goal.get("description", "No description")
-    return f"- Kind: {kind}\n- Description: {description}"
 
 
 class NerExtractionAgent:

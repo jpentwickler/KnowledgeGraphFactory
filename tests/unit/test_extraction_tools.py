@@ -9,6 +9,10 @@ from tools.extraction_tools import (
     handle_get_proposed_entities,
     handle_approve_proposed_entities,
     handle_search_files,
+    handle_add_proposed_fact,
+    handle_remove_proposed_fact,
+    handle_get_proposed_facts,
+    handle_approve_proposed_facts,
     build_structured_preview,
     build_markdown_context,
     build_well_known_types,
@@ -445,9 +449,189 @@ def test_set_proposed_entities_without_evidence():
     print("[OK] test_set_proposed_entities_without_evidence passed")
 
 
+# ---------------------------------------------------------------------------
+# Fact Type Handler Tests
+# ---------------------------------------------------------------------------
+
+
+def _make_fact_state():
+    """Create a state with approved entity types for fact tests."""
+    return {
+        "approved_entity_types": {
+            "Product": {"source": "well_known", "description": "Products"},
+            "Issue": {"source": "discovered", "description": "Quality issues"},
+            "Customer": {"source": "discovered", "description": "Customers"},
+        }
+    }
+
+
+def test_add_proposed_fact_success():
+    """Test adding a valid fact type."""
+    state = _make_fact_state()
+
+    result = handle_add_proposed_fact(
+        state,
+        subject_label="Product",
+        predicate_label="has_issue",
+        object_label="Issue",
+    )
+
+    assert result["status"] == "success", f"Expected success, got {result}"
+    assert "proposed_fact_types" in state, "State missing proposed_fact_types"
+    fact = state["proposed_fact_types"]["has_issue"]
+    assert fact["subject_label"] == "Product"
+    assert fact["predicate_label"] == "has_issue"
+    assert fact["object_label"] == "Issue"
+    print("[OK] test_add_proposed_fact_success passed")
+
+
+def test_add_proposed_fact_invalid_subject():
+    """Test rejecting a subject not in approved entity types."""
+    state = _make_fact_state()
+
+    result = handle_add_proposed_fact(
+        state,
+        subject_label="UnknownType",
+        predicate_label="has_issue",
+        object_label="Issue",
+    )
+
+    assert result["status"] == "error", "Expected error for invalid subject"
+    assert "UnknownType" in result["message"], "Error should mention the invalid type"
+    assert "proposed_fact_types" not in state, "State should not be modified"
+    print("[OK] test_add_proposed_fact_invalid_subject passed")
+
+
+def test_add_proposed_fact_invalid_object():
+    """Test rejecting an object not in approved entity types."""
+    state = _make_fact_state()
+
+    result = handle_add_proposed_fact(
+        state,
+        subject_label="Product",
+        predicate_label="has_issue",
+        object_label="NonExistent",
+    )
+
+    assert result["status"] == "error", "Expected error for invalid object"
+    assert "NonExistent" in result["message"], "Error should mention the invalid type"
+    assert "proposed_fact_types" not in state, "State should not be modified"
+    print("[OK] test_add_proposed_fact_invalid_object passed")
+
+
+def test_add_proposed_fact_invalid_predicate():
+    """Test rejecting predicates with uppercase or spaces."""
+    state = _make_fact_state()
+
+    # Uppercase
+    result = handle_add_proposed_fact(
+        state,
+        subject_label="Product",
+        predicate_label="HasIssue",
+        object_label="Issue",
+    )
+    assert result["status"] == "error", "Expected error for uppercase predicate"
+    assert "lowercase" in result["message"].lower(), "Error should mention lowercase"
+
+    # Spaces
+    result = handle_add_proposed_fact(
+        state,
+        subject_label="Product",
+        predicate_label="has issue",
+        object_label="Issue",
+    )
+    assert result["status"] == "error", "Expected error for predicate with spaces"
+
+    assert "proposed_fact_types" not in state, "State should not be modified"
+    print("[OK] test_add_proposed_fact_invalid_predicate passed")
+
+
+def test_remove_proposed_fact_success():
+    """Test removing an existing proposed fact type."""
+    state = _make_fact_state()
+    state["proposed_fact_types"] = {
+        "has_issue": {
+            "subject_label": "Product",
+            "predicate_label": "has_issue",
+            "object_label": "Issue",
+        },
+        "reported_by": {
+            "subject_label": "Issue",
+            "predicate_label": "reported_by",
+            "object_label": "Customer",
+        },
+    }
+
+    result = handle_remove_proposed_fact(state, predicate_label="has_issue")
+
+    assert result["status"] == "success", f"Expected success, got {result}"
+    assert "has_issue" not in state["proposed_fact_types"], "Fact should be removed"
+    assert len(state["proposed_fact_types"]) == 1, "Should have 1 remaining"
+    print("[OK] test_remove_proposed_fact_success passed")
+
+
+def test_remove_proposed_fact_not_found():
+    """Test removing a non-existent predicate returns error."""
+    state = _make_fact_state()
+    state["proposed_fact_types"] = {}
+
+    result = handle_remove_proposed_fact(state, predicate_label="nonexistent")
+
+    assert result["status"] == "error", "Expected error for missing predicate"
+    assert "nonexistent" in result["message"], "Error should mention the predicate"
+    print("[OK] test_remove_proposed_fact_not_found passed")
+
+
+def test_get_proposed_facts_empty():
+    """Test getting facts from empty state returns empty dict."""
+    state = _make_fact_state()
+
+    result = handle_get_proposed_facts(state)
+
+    assert result["status"] == "success", f"Expected success, got {result}"
+    assert result["proposed_fact_types"] == {}, "Expected empty dict"
+    assert result["count"] == 0, "Expected count 0"
+    print("[OK] test_get_proposed_facts_empty passed")
+
+
+def test_approve_proposed_facts_success():
+    """Test successful approval deep copies proposed to approved."""
+    state = _make_fact_state()
+    state["proposed_fact_types"] = {
+        "has_issue": {
+            "subject_label": "Product",
+            "predicate_label": "has_issue",
+            "object_label": "Issue",
+        },
+    }
+
+    result = handle_approve_proposed_facts(state)
+
+    assert result["status"] == "success", f"Expected success, got {result}"
+    assert "approved_fact_types" in state, "approved_fact_types missing"
+    assert "has_issue" in state["approved_fact_types"], "Fact not in approved"
+
+    # Verify deep copy (not shared reference)
+    state["proposed_fact_types"]["new_fact"] = {"subject_label": "X"}
+    assert "new_fact" not in state["approved_fact_types"], "Should be independent"
+    print("[OK] test_approve_proposed_facts_success passed")
+
+
+def test_approve_proposed_facts_no_proposal():
+    """Test approving when no proposal exists returns error."""
+    state = _make_fact_state()
+
+    result = handle_approve_proposed_facts(state)
+
+    assert result["status"] == "error", "Expected error when no proposal"
+    assert "approved_fact_types" not in state, "State should not be modified"
+    print("[OK] test_approve_proposed_facts_no_proposal passed")
+
+
 if __name__ == "__main__":
     print("Running extraction tools unit tests...\n")
 
+    # NER tests
     test_set_proposed_entities_success()
     test_set_proposed_entities_invalid_case()
     test_set_proposed_entities_invalid_source()
@@ -465,5 +649,16 @@ if __name__ == "__main__":
     test_search_files_max_matches()
     test_set_proposed_entities_with_evidence()
     test_set_proposed_entities_without_evidence()
+
+    # Fact type tests
+    test_add_proposed_fact_success()
+    test_add_proposed_fact_invalid_subject()
+    test_add_proposed_fact_invalid_object()
+    test_add_proposed_fact_invalid_predicate()
+    test_remove_proposed_fact_success()
+    test_remove_proposed_fact_not_found()
+    test_get_proposed_facts_empty()
+    test_approve_proposed_facts_success()
+    test_approve_proposed_facts_no_proposal()
 
     print("\n=== All tests passed! ===")

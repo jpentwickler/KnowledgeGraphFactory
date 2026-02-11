@@ -5,6 +5,7 @@ from agents.file_suggestion import FileSuggestionAgent
 from agents.schema_proposal import SchemaProposalAgent
 from agents.schema_critic import SchemaCriticAgent
 from agents.ner_extraction import NerExtractionAgent
+from agents.fact_extraction import FactExtractionAgent
 
 __all__ = [
     "UserIntentAgent",
@@ -12,4 +13,5 @@ __all__ = [
     "SchemaProposalAgent",
     "SchemaCriticAgent",
     "NerExtractionAgent",
+    "FactExtractionAgent",
 ]

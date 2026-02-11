@@ -18,6 +18,9 @@ from core import (
     get_approved,
     has_approved,
 )
+
+# Regex for valid predicate labels: lowercase letters, digits, underscores only
+_PREDICATE_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 from tools.file_tools import _get_data_dir, _normalize_path
 
 
@@ -459,5 +462,252 @@ def handle_approve_proposed_entities(state: dict) -> dict:
         "message": "Entity types approved.",
         "approved_entity_types": state["approved_entity_types"],
     }
+
+
+# ---------------------------------------------------------------------------
+# Fact Type Tool Schemas
+# ---------------------------------------------------------------------------
+
+TOOL_ADD_PROPOSED_FACT = create_tool_schema(
+    name="add_proposed_fact",
+    description=(
+        "Add a single proposed fact type (relationship template). "
+        "Each fact type defines a directed relationship between two entity types. "
+        "Call once per fact type. The predicate must be unique."
+    ),
+    properties={
+        "subject_label": {
+            "type": "string",
+            "description": (
+                "Source entity type (must be an approved entity type). "
+                "Example: 'Product'"
+            ),
+        },
+        "predicate_label": {
+            "type": "string",
+            "description": (
+                "Relationship name in lowercase_with_underscores. "
+                "Example: 'has_issue', 'supplied_by'"
+            ),
+        },
+        "object_label": {
+            "type": "string",
+            "description": (
+                "Target entity type (must be an approved entity type). "
+                "Example: 'Issue'"
+            ),
+        },
+    },
+    required=["subject_label", "predicate_label", "object_label"],
+)
+
+TOOL_REMOVE_PROPOSED_FACT = create_tool_schema(
+    name="remove_proposed_fact",
+    description="Remove a previously proposed fact type by its predicate label.",
+    properties={
+        "predicate_label": {
+            "type": "string",
+            "description": "The predicate label of the fact type to remove.",
+        },
+    },
+    required=["predicate_label"],
+)
+
+TOOL_GET_PROPOSED_FACTS = create_tool_schema(
+    name="get_proposed_facts",
+    description="Get all currently proposed fact types.",
+    properties={},
+    required=[],
+)
+
+TOOL_APPROVE_PROPOSED_FACTS = create_tool_schema(
+    name="approve_proposed_facts",
+    description=(
+        "Finalize fact types after user explicitly approves. "
+        "Only use when user explicitly says to approve."
+    ),
+    properties={},
+    required=[],
+)
+
+
+# ---------------------------------------------------------------------------
+# Fact Type Tool Handlers
+# ---------------------------------------------------------------------------
+
+
+def handle_add_proposed_fact(
+    state: dict, subject_label: str, predicate_label: str, object_label: str
+) -> dict:
+    """Add a single proposed fact type (relationship template).
+
+    Validates:
+    - subject_label is in approved_entity_types
+    - object_label is in approved_entity_types
+    - predicate_label is lowercase_with_underscores (no spaces, no uppercase)
+
+    Args:
+        state: Current state dictionary (must contain approved_entity_types).
+        subject_label: Source entity type name.
+        predicate_label: Relationship name in lowercase_with_underscores.
+        object_label: Target entity type name.
+
+    Returns:
+        Tool result with the added fact type or validation error.
+    """
+    # Validate approved entity types exist
+    approved_entities = state.get("approved_entity_types", {})
+    if not approved_entities:
+        return {
+            "status": "error",
+            "message": "No approved entity types found. NER stage must be completed first.",
+        }
+
+    # Validate subject
+    if subject_label not in approved_entities:
+        available = ", ".join(sorted(approved_entities.keys()))
+        return {
+            "status": "error",
+            "message": (
+                f"Subject '{subject_label}' is not an approved entity type. "
+                f"Available: {available}"
+            ),
+        }
+
+    # Validate object
+    if object_label not in approved_entities:
+        available = ", ".join(sorted(approved_entities.keys()))
+        return {
+            "status": "error",
+            "message": (
+                f"Object '{object_label}' is not an approved entity type. "
+                f"Available: {available}"
+            ),
+        }
+
+    # Validate predicate format
+    if not _PREDICATE_RE.match(predicate_label):
+        return {
+            "status": "error",
+            "message": (
+                f"Predicate '{predicate_label}' must be lowercase_with_underscores "
+                f"(e.g., 'has_issue', 'supplied_by'). No spaces or uppercase."
+            ),
+        }
+
+    # Store fact type (predicate is dict key for uniqueness)
+    if "proposed_fact_types" not in state:
+        state["proposed_fact_types"] = {}
+
+    fact = {
+        "subject_label": subject_label,
+        "predicate_label": predicate_label,
+        "object_label": object_label,
+    }
+    state["proposed_fact_types"][predicate_label] = fact
+
+    return {
+        "status": "success",
+        "message": (
+            f"Added fact type: ({subject_label})-[{predicate_label}]->({object_label}). "
+            f"Total proposed: {len(state['proposed_fact_types'])}."
+        ),
+        "fact": fact,
+    }
+
+
+def handle_remove_proposed_fact(state: dict, predicate_label: str) -> dict:
+    """Remove a proposed fact type by predicate label.
+
+    Args:
+        state: Current state dictionary.
+        predicate_label: The predicate of the fact type to remove.
+
+    Returns:
+        Tool result confirming removal or error if not found.
+    """
+    proposed = state.get("proposed_fact_types", {})
+
+    if predicate_label not in proposed:
+        available = ", ".join(sorted(proposed.keys())) if proposed else "(none)"
+        return {
+            "status": "error",
+            "message": (
+                f"No proposed fact type with predicate '{predicate_label}'. "
+                f"Current predicates: {available}"
+            ),
+        }
+
+    removed = proposed.pop(predicate_label)
+    return {
+        "status": "success",
+        "message": (
+            f"Removed fact type: ({removed['subject_label']})-"
+            f"[{predicate_label}]->({removed['object_label']}). "
+            f"Remaining: {len(proposed)}."
+        ),
+    }
+
+
+def handle_get_proposed_facts(state: dict) -> dict:
+    """Get all currently proposed fact types.
+
+    Args:
+        state: Current state dictionary.
+
+    Returns:
+        Tool result with proposed fact types and count.
+    """
+    proposed = state.get("proposed_fact_types", {})
+    return {
+        "status": "success",
+        "proposed_fact_types": proposed,
+        "count": len(proposed),
+    }
+
+
+def handle_approve_proposed_facts(state: dict) -> dict:
+    """Finalize fact types after user approval.
+
+    Uses deep copy to avoid shared references between proposed and approved.
+
+    Args:
+        state: Current state dictionary.
+
+    Returns:
+        Tool result with approved fact types or error if no proposal exists.
+    """
+    proposed = state.get("proposed_fact_types")
+    if not proposed:
+        return {"status": "error", "message": "No proposed fact types to approve."}
+
+    state["approved_fact_types"] = copy.deepcopy(proposed)
+    return {
+        "status": "success",
+        "message": f"Fact types approved ({len(state['approved_fact_types'])} total).",
+        "approved_fact_types": state["approved_fact_types"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Shared Helper: format_user_goal
+# ---------------------------------------------------------------------------
+
+
+def format_user_goal(goal: dict) -> str:
+    """Format user goal dict into readable text for prompt injection.
+
+    Args:
+        goal: Dictionary with 'kind' and 'description' keys.
+
+    Returns:
+        Formatted string for prompt injection.
+    """
+    if not goal:
+        return "(No user goal found)"
+
+    kind = goal.get("kind", "Unknown")
+    description = goal.get("description", "No description")
+    return f"- Kind: {kind}\n- Description: {description}"
 
 
