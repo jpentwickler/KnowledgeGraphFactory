@@ -96,53 +96,84 @@ PROPOSED ENTITY TYPES:
 PROPOSED FACT TYPES:
 {fact_types}
 
+GROUNDING EVIDENCE (gathered by the NER agent via search_files):
+{entity_evidence}
+
+This evidence was gathered by the NER agent during its analysis. For each
+discovered entity type, the agent searched for relevant patterns and recorded
+the results. Use this evidence to assess text grounding quality:
+- Types with high mention counts across multiple files are well-grounded
+- Types with 0 mentions or no evidence may be ungrounded
+- Check that search patterns are relevant to the entity type
+- Check that example excerpts actually support the entity type
+
 VALIDATION RULES -- ENTITY TYPES:
 
 1. Well-known coverage: For each well-known type listed above, check if it \
 appears in the text previews. If a well-known type is NOT included in the \
 proposed entity types but IS mentioned in the text, flag it as missing.
 
-2. Text grounding: For each proposed entity type, verify that examples of \
-that type actually appear in the file previews. If you cannot find any \
-mentions of a proposed type in the text, flag it as ungrounded.
+2. Search pattern relevance: For discovered types with evidence, check that \
+the search patterns used are relevant to the entity type. For example, \
+searching "defect" for a "Defect" type is good, but searching "the" would \
+be meaningless. Flag types where the patterns don't match the concept.
 
-3. No overlapping types: Check for entity types that capture the same concept \
+3. Excerpt authenticity: Check that the example excerpts actually support \
+the entity type. The excerpts should contain real mentions of the concept, \
+not incidental word matches. Flag types where excerpts don't demonstrate \
+genuine entity instances.
+
+4. Evidence distribution: Check whether evidence comes from multiple files \
+or is concentrated in just one. Types grounded across multiple files are \
+stronger. Flag types with evidence from only one file if multiple files \
+are available.
+
+5. Evidence sufficiency: Discovered types should have meaningful evidence. \
+Types with fewer than 3 total mentions may be too rare to justify as a \
+separate entity type. Flag types with very low mention counts.
+
+6. Missing evidence: Discovered types that have NO grounding evidence at \
+all should be flagged. The NER agent should have gathered evidence before \
+proposing discovered types. Missing evidence suggests the type was proposed \
+without verification.
+
+7. No overlapping types: Check for entity types that capture the same concept \
 under different names (e.g., "Defect" and "Issue" both meaning product problems). \
 Flag overlaps and recommend which to keep.
 
-4. No quantities as entities: Entity types should represent things, not \
+8. No quantities as entities: Entity types should represent things, not \
 measurements. Types like "Rating", "Price", "Age", "Count" should be properties \
 on another entity, not standalone types. Flag any proposed types that are \
 quantities or measurements.
 
-5. Goal relevance: Every proposed entity type should clearly support the \
+9. Goal relevance: Every proposed entity type should clearly support the \
 user's stated goal. Flag types that have no obvious connection to the goal.
 
-6. Format: Entity type names should be PascalCase singular nouns (e.g., \
+10. Format: Entity type names should be PascalCase singular nouns (e.g., \
 "ProductIssue", not "product_issues" or "Issues").
 
 VALIDATION RULES -- FACT TYPES (skip if none proposed):
 
-7. Entity membership: Both subject and object of every fact type must be \
+11. Entity membership: Both subject and object of every fact type must be \
 proposed entity types. Flag any fact type that references a type not in the \
 entity types list.
 
-8. Predicate specificity: Flag vague predicates like "related_to", \
+12. Predicate specificity: Flag vague predicates like "related_to", \
 "associated_with", "connected_to", "has_relationship". Predicates should \
 describe a specific, meaningful connection.
 
-9. No redundant relationships: Check for fact types that are semantically \
+13. No redundant relationships: Check for fact types that are semantically \
 equivalent or inverse of each other (e.g., "has_issue" and "issue_of" between \
 the same two types). Flag redundancies.
 
-10. Text grounding: For each proposed fact type, verify that the relationship \
+14. Text grounding: For each proposed fact type, verify that the relationship \
 pattern appears in the file previews. Can you find sentences where the subject \
 and object co-occur in the described relationship? If not, flag as ungrounded.
 
-11. Predicate format: Predicates should be lowercase_with_underscores \
+15. Predicate format: Predicates should be lowercase_with_underscores \
 (e.g., "has_issue", not "HAS_ISSUE" or "hasIssue"). Flag format violations.
 
-12. Directionality: Check that the subject-object direction makes semantic \
+16. Directionality: Check that the subject-object direction makes semantic \
 sense. For example, (Product)-[has_issue]->(Issue) is correct, but \
 (Issue)-[has_issue]->(Product) is backwards. Flag suspicious directionality.
 
@@ -183,6 +214,50 @@ def _format_fact_types(state: dict) -> str:
         subj = triple.get("subject_label", "?")
         obj = triple.get("object_label", "?")
         lines.append(f"- ({subj})-[{predicate}]->({obj})")
+    return "\n".join(lines)
+
+
+def _format_entity_evidence(state: dict) -> str:
+    """Format grounding evidence from proposed/approved entity types.
+
+    Reads the grounding_evidence field stored alongside entity type proposals.
+    Well-known types don't need evidence. Discovered types without evidence
+    are flagged.
+
+    Args:
+        state: Current state dictionary with proposed or approved entity types.
+
+    Returns:
+        Formatted string for prompt injection.
+    """
+    entities = state.get("proposed_entity_types") or state.get("approved_entity_types", {})
+    if not entities:
+        return "(no entity types to validate)"
+
+    lines = []
+    for name, details in entities.items():
+        source = details.get("source", "unknown")
+        evidence = details.get("grounding_evidence")
+
+        if source == "well_known":
+            lines.append(f"- {name} (well_known): No evidence required")
+        elif evidence:
+            patterns = ", ".join(evidence.get("search_patterns", []))
+            total = evidence.get("total_mentions", 0)
+            files = evidence.get("files_with_evidence", 0)
+            excerpts = evidence.get("example_excerpts", [])
+            top_excerpts = excerpts[:3]
+            excerpt_strs = [f'"{e}"' for e in top_excerpts]
+
+            lines.append(
+                f"- {name} (discovered): {total} mentions across {files} file(s), "
+                f"patterns: [{patterns}]"
+            )
+            if excerpt_strs:
+                lines.append(f"  Examples: {', '.join(excerpt_strs)}")
+        else:
+            lines.append(f"- {name} (discovered): NO EVIDENCE PROVIDED")
+
     return "\n".join(lines)
 
 
@@ -237,6 +312,7 @@ class SchemaCriticAgent:
             well_known_types = build_well_known_types(state)
             entity_types = _format_entity_types(state)
             fact_types = _format_fact_types(state)
+            entity_evidence = _format_entity_evidence(state)
 
             system_prompt = UNSTRUCTURED_PROMPT_TEMPLATE.format(
                 user_goal_kind=user_goal_kind,
@@ -245,6 +321,7 @@ class SchemaCriticAgent:
                 file_context=file_context,
                 entity_types=entity_types,
                 fact_types=fact_types,
+                entity_evidence=entity_evidence,
             )
 
             if state.get("proposed_fact_types") or state.get("approved_fact_types"):

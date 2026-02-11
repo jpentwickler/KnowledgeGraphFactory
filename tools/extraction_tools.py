@@ -8,6 +8,7 @@ Provides:
 
 import copy
 import os
+import re
 
 from core import (
     create_tool_schema,
@@ -74,13 +75,16 @@ def build_structured_preview(file_path: str, lines_per_section: int = 5) -> str:
         output.append(f"{heading}  [line {line_num}]")
         for p in preview:
             if p.strip():
-                output.append(f"  {p.rstrip()}")
+                line_text = p.rstrip()
+                if len(line_text) > 200:
+                    line_text = line_text[:200] + "..."
+                output.append(f"  {line_text}")
         output.append("")
 
     return "\n".join(output)
 
 
-def build_markdown_context(state: dict) -> str:
+def build_markdown_context(state: dict, lines_per_section: int = 5) -> str:
     """Build structure-aware preview context for all approved markdown files.
 
     Reads each unstructured file and builds a structured preview showing
@@ -88,6 +92,7 @@ def build_markdown_context(state: dict) -> str:
 
     Args:
         state: Current state dictionary (must contain approved_files).
+        lines_per_section: Number of preview lines per section (default 5).
 
     Returns:
         Formatted string with all markdown file previews, or empty if no files.
@@ -104,7 +109,7 @@ def build_markdown_context(state: dict) -> str:
         path = file_entry["path"]
         abs_path = os.path.join(data_dir, path)
         abs_path = os.path.abspath(abs_path)
-        parts.append(build_structured_preview(abs_path))
+        parts.append(build_structured_preview(abs_path, lines_per_section))
 
     return "\n".join(parts)
 
@@ -157,6 +162,138 @@ def build_entity_types_context(state: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Search Tool Schema & Handler
+# ---------------------------------------------------------------------------
+
+TOOL_SEARCH_FILES = create_tool_schema(
+    name="search_files",
+    description=(
+        "Search approved markdown files for a text pattern. "
+        "Returns matching lines with context. Use this to check "
+        "whether specific terms, concepts, or patterns appear in the text."
+    ),
+    properties={
+        "pattern": {
+            "type": "string",
+            "description": (
+                "Search pattern (case-insensitive substring match). "
+                "Examples: 'warranty', 'defect', 'customer complaint'."
+            ),
+        },
+        "file_path": {
+            "type": "string",
+            "description": (
+                "Optional. Search only this file (e.g., 'reviews.md'). "
+                "If omitted, searches all approved markdown files."
+            ),
+        },
+    },
+    required=["pattern"],
+)
+
+
+def handle_search_files(
+    state: dict, pattern: str, file_path: str = None
+) -> dict:
+    """Search approved markdown files for a text pattern.
+
+    Performs case-insensitive search across approved unstructured files.
+    Returns matching lines with 1 line of context before/after.
+
+    Args:
+        state: Current state dictionary (must contain approved_files).
+        pattern: Search pattern (case-insensitive substring match).
+        file_path: Optional specific file to search. If omitted, searches all.
+
+    Returns:
+        Tool result with matches, or error if no approved files.
+    """
+    if not has_approved(state, "files"):
+        return {
+            "status": "error",
+            "message": "No approved files found. File Suggestion stage must be completed first.",
+        }
+
+    approved = get_approved(state, "files")
+    unstructured = approved.get("unstructured", [])
+
+    if not unstructured:
+        return {
+            "status": "error",
+            "message": "No approved markdown files to search.",
+        }
+
+    data_dir = _get_data_dir()
+
+    # Filter to specific file if requested
+    if file_path:
+        unstructured = [f for f in unstructured if f["path"] == file_path]
+        if not unstructured:
+            return {
+                "status": "error",
+                "message": f"File '{file_path}' is not in the approved markdown files.",
+            }
+
+    max_matches = 20
+    matches = []
+    files_searched = []
+
+    for file_entry in unstructured:
+        fpath = file_entry["path"]
+        abs_path = os.path.join(data_dir, fpath)
+        abs_path = os.path.abspath(abs_path)
+
+        # Security: ensure path stays within data directory
+        if not abs_path.startswith(os.path.abspath(data_dir)):
+            continue
+
+        if not os.path.isfile(abs_path):
+            continue
+
+        files_searched.append(fpath)
+
+        try:
+            with open(abs_path, "r", encoding="utf-8") as f:
+                lines = [line.rstrip("\n") for line in f]
+        except Exception:
+            continue
+
+        for i, line in enumerate(lines):
+            if len(matches) >= max_matches:
+                break
+
+            if re.search(pattern, line, re.IGNORECASE):
+                # Build context: 1 line before and after, truncate long lines
+                max_line_len = 200
+                context_lines = []
+                if i > 0:
+                    prev = lines[i - 1][:max_line_len]
+                    context_lines.append(f"  {i}: {prev}")
+                match_line = line[:max_line_len]
+                context_lines.append(f"> {i + 1}: {match_line}")
+                if i < len(lines) - 1:
+                    next_line = lines[i + 1][:max_line_len]
+                    context_lines.append(f"  {i + 2}: {next_line}")
+
+                matches.append({
+                    "file": fpath,
+                    "line_number": i + 1,
+                    "context": "\n".join(context_lines),
+                })
+
+        if len(matches) >= max_matches:
+            break
+
+    return {
+        "status": "success",
+        "pattern": pattern,
+        "files_searched": files_searched,
+        "match_count": len(matches),
+        "matches": matches,
+    }
+
+
+# ---------------------------------------------------------------------------
 # NER Tool Schemas
 # ---------------------------------------------------------------------------
 
@@ -181,6 +318,33 @@ TOOL_SET_PROPOSED_ENTITIES = create_tool_schema(
                     "description": {
                         "type": "string",
                         "description": "What this entity type represents and why it's relevant to the goal",
+                    },
+                    "grounding_evidence": {
+                        "type": "object",
+                        "description": (
+                            "Evidence gathered via search_files for discovered types. "
+                            "Not required for well_known types."
+                        ),
+                        "properties": {
+                            "search_patterns": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Patterns searched (e.g., ['defect', 'defective', 'flaw'])",
+                            },
+                            "total_mentions": {
+                                "type": "integer",
+                                "description": "Total matches found across all patterns and files",
+                            },
+                            "example_excerpts": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Representative matching lines from the text (3-5 examples)",
+                            },
+                            "files_with_evidence": {
+                                "type": "integer",
+                                "description": "Number of files where matches were found",
+                            },
+                        },
                     },
                 },
                 "required": ["name", "source", "description"],
@@ -248,6 +412,9 @@ def handle_set_proposed_entities(state: dict, entity_types: list) -> dict:
             "description": et["description"],
         }
 
+        if "grounding_evidence" in et:
+            result[name]["grounding_evidence"] = et["grounding_evidence"]
+
     state["proposed_entity_types"] = result
     return {
         "status": "success",
@@ -292,3 +459,5 @@ def handle_approve_proposed_entities(state: dict) -> dict:
         "message": "Entity types approved.",
         "approved_entity_types": state["approved_entity_types"],
     }
+
+

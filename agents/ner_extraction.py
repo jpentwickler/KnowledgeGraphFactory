@@ -13,9 +13,11 @@ from tools.extraction_tools import (
     TOOL_SET_PROPOSED_ENTITIES,
     TOOL_GET_PROPOSED_ENTITIES,
     TOOL_APPROVE_PROPOSED_ENTITIES,
+    TOOL_SEARCH_FILES,
     handle_set_proposed_entities,
     handle_get_proposed_entities,
     handle_approve_proposed_entities,
+    handle_search_files,
     build_markdown_context,
     build_well_known_types,
 )
@@ -110,8 +112,43 @@ by summarizing what you analyzed before presenting your proposal:
 - What you considered but excluded, and why (e.g., "I excluded Rating
   because it's a quantity, not an entity")
 - If you used sample_file, explain what you read and what it revealed
+- For each discovered type, report the evidence gathered: patterns
+  searched, total mentions found, and which files contained matches
 
 The user should never wonder what you did or what you looked at.
+
+## File Access Tools
+
+- 'sample_file': Read a specific section of a file by line range. Use when you know
+  WHERE to look (e.g., "lines 45-60 of reviews.md" from the preview above).
+- 'search_files': Search for a pattern across files. Use when you want to CHECK
+  WHETHER a concept appears in the text (e.g., "does 'warranty' appear anywhere?").
+  Also useful for finding all mentions of a candidate entity type before proposing it.
+
+## Evidence Gathering (REQUIRED for discovered types)
+
+For every discovered entity type, you MUST use search_files to gather
+grounding evidence BEFORE proposing it. This evidence is stored alongside
+the proposal and used by the critic for validation.
+
+For each candidate discovered type:
+1. Search 2-3 relevant patterns (e.g., for "Defect": search "defect",
+   "defective", "flaw")
+2. Record the total mentions found across all patterns
+3. Note 3-5 representative example excerpts from the matches
+4. Count how many files had matches
+
+Include this as grounding_evidence when calling set_proposed_entities:
+- search_patterns: the patterns you searched
+- total_mentions: total matches found
+- example_excerpts: representative matching lines
+- files_with_evidence: number of files with matches
+
+Well-known types do NOT need grounding_evidence (they come from the schema).
+
+If you search for a candidate type and find 0 matches, reconsider whether
+that type truly exists in the text. Either try different search patterns
+or exclude the type.
 
 ## Workflow
 
@@ -119,13 +156,17 @@ The user should never wonder what you did or what you looked at.
 2. If any section preview is truncated or unclear, use sample_file
    to read more content (line numbers are provided in the previews)
 3. Identify which well-known types appear in the text
-4. Discover additional types that support the user's goal
-5. Propose the combined list using set_proposed_entities
+4. For each candidate discovered type, search 2-3 patterns using
+   search_files, review the results, and decide to include or exclude
+   based on the evidence found
+5. Propose the combined list using set_proposed_entities, including
+   grounding_evidence for all discovered types
 6. Present each type with:
    - Whether it's well-known or discovered
    - What it represents
    - Why it supports the goal
-   - An example mention from the text
+   - Evidence summary for discovered types (patterns searched,
+     total mentions, which files)
 7. Wait for user feedback - iterate if they want changes
 8. If the user asks you to look deeper into a file or section, use
    sample_file and reconsider your proposal based on what you find
@@ -161,12 +202,14 @@ class NerExtractionAgent:
         """Initialize the NER Extraction agent with tools and handlers."""
         self.tools = [
             TOOL_SAMPLE_FILE,
+            TOOL_SEARCH_FILES,
             TOOL_SET_PROPOSED_ENTITIES,
             TOOL_GET_PROPOSED_ENTITIES,
             TOOL_APPROVE_PROPOSED_ENTITIES,
         ]
         self.tool_handlers = {
             "sample_file": handle_sample_file,
+            "search_files": handle_search_files,
             "set_proposed_entities": handle_set_proposed_entities,
             "get_proposed_entities": handle_get_proposed_entities,
             "approve_proposed_entities": handle_approve_proposed_entities,
@@ -194,7 +237,7 @@ class NerExtractionAgent:
         user_goal_str = format_user_goal(user_goal)
 
         well_known_types = build_well_known_types(state)
-        file_context = build_markdown_context(state)
+        file_context = build_markdown_context(state, lines_per_section=2)
 
         # Inject into prompt template
         system_prompt = SYSTEM_PROMPT_TEMPLATE.format(

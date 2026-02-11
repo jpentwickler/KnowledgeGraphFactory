@@ -8,6 +8,7 @@ from tools.extraction_tools import (
     handle_set_proposed_entities,
     handle_get_proposed_entities,
     handle_approve_proposed_entities,
+    handle_search_files,
     build_structured_preview,
     build_markdown_context,
     build_well_known_types,
@@ -27,6 +28,12 @@ def test_set_proposed_entities_success():
             "name": "Issue",
             "source": "discovered",
             "description": "Problems reported by reviewers",
+            "grounding_evidence": {
+                "search_patterns": ["issue", "problem"],
+                "total_mentions": 14,
+                "example_excerpts": ["The issue was obvious"],
+                "files_with_evidence": 2,
+            },
         },
     ]
 
@@ -40,6 +47,12 @@ def test_set_proposed_entities_success():
     assert (
         state["proposed_entity_types"]["Product"]["source"] == "well_known"
     ), "Product source incorrect"
+    assert (
+        "grounding_evidence" in state["proposed_entity_types"]["Issue"]
+    ), "Issue should have grounding_evidence"
+    assert (
+        state["proposed_entity_types"]["Issue"]["grounding_evidence"]["total_mentions"] == 14
+    ), "Issue evidence total_mentions incorrect"
     print("[OK] test_set_proposed_entities_success passed")
 
 
@@ -237,6 +250,201 @@ def test_build_well_known_types():
     print("[OK] test_build_well_known_types passed")
 
 
+def test_search_files_basic():
+    """Test basic pattern search returns matches with context."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        os.environ["KG_DATA_DIR"] = tmpdir
+
+        file1 = os.path.join(tmpdir, "reviews.md")
+        with open(file1, "w", encoding="utf-8") as f:
+            f.write("# Product Reviews\n")
+            f.write("The KALLAX shelf is great.\n")
+            f.write("However the warranty is unclear.\n")
+            f.write("I contacted support about it.\n")
+
+        state = {
+            "approved_files": {
+                "unstructured": [
+                    {"path": "reviews.md", "reason": "Product reviews"},
+                ]
+            }
+        }
+
+        result = handle_search_files(state, pattern="warranty")
+
+        assert result["status"] == "success", f"Expected success, got {result}"
+        assert result["match_count"] == 1, f"Expected 1 match, got {result['match_count']}"
+        assert result["matches"][0]["file"] == "reviews.md"
+        assert result["matches"][0]["line_number"] == 3
+        assert "warranty" in result["matches"][0]["context"].lower()
+    print("[OK] test_search_files_basic passed")
+
+
+def test_search_files_no_matches():
+    """Test search with no results returns empty list."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        os.environ["KG_DATA_DIR"] = tmpdir
+
+        file1 = os.path.join(tmpdir, "reviews.md")
+        with open(file1, "w", encoding="utf-8") as f:
+            f.write("# Product Reviews\n")
+            f.write("The shelf is great.\n")
+
+        state = {
+            "approved_files": {
+                "unstructured": [
+                    {"path": "reviews.md", "reason": "Reviews"},
+                ]
+            }
+        }
+
+        result = handle_search_files(state, pattern="nonexistent_term_xyz")
+
+        assert result["status"] == "success", f"Expected success, got {result}"
+        assert result["match_count"] == 0, f"Expected 0 matches, got {result['match_count']}"
+        assert result["matches"] == []
+    print("[OK] test_search_files_no_matches passed")
+
+
+def test_search_files_specific_file():
+    """Test file_path filters to a single file."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        os.environ["KG_DATA_DIR"] = tmpdir
+
+        with open(os.path.join(tmpdir, "file1.md"), "w", encoding="utf-8") as f:
+            f.write("warranty info here\n")
+        with open(os.path.join(tmpdir, "file2.md"), "w", encoding="utf-8") as f:
+            f.write("warranty info there\n")
+
+        state = {
+            "approved_files": {
+                "unstructured": [
+                    {"path": "file1.md", "reason": "File 1"},
+                    {"path": "file2.md", "reason": "File 2"},
+                ]
+            }
+        }
+
+        result = handle_search_files(state, pattern="warranty", file_path="file1.md")
+
+        assert result["status"] == "success"
+        assert result["files_searched"] == ["file1.md"]
+        assert result["match_count"] == 1
+        assert result["matches"][0]["file"] == "file1.md"
+    print("[OK] test_search_files_specific_file passed")
+
+
+def test_search_files_case_insensitive():
+    """Test case-insensitive matching."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        os.environ["KG_DATA_DIR"] = tmpdir
+
+        file1 = os.path.join(tmpdir, "reviews.md")
+        with open(file1, "w", encoding="utf-8") as f:
+            f.write("The Product is excellent.\n")
+            f.write("Another PRODUCT arrived.\n")
+            f.write("This product works fine.\n")
+
+        state = {
+            "approved_files": {
+                "unstructured": [
+                    {"path": "reviews.md", "reason": "Reviews"},
+                ]
+            }
+        }
+
+        result = handle_search_files(state, pattern="product")
+
+        assert result["status"] == "success"
+        assert result["match_count"] == 3, f"Expected 3 matches, got {result['match_count']}"
+    print("[OK] test_search_files_case_insensitive passed")
+
+
+def test_search_files_max_matches():
+    """Test that matches are capped at 20."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        os.environ["KG_DATA_DIR"] = tmpdir
+
+        file1 = os.path.join(tmpdir, "big.md")
+        with open(file1, "w", encoding="utf-8") as f:
+            for i in range(100):
+                f.write(f"Line {i} mentions warranty\n")
+
+        state = {
+            "approved_files": {
+                "unstructured": [
+                    {"path": "big.md", "reason": "Big file"},
+                ]
+            }
+        }
+
+        result = handle_search_files(state, pattern="warranty")
+
+        assert result["status"] == "success"
+        assert result["match_count"] == 20, f"Expected 20 (cap), got {result['match_count']}"
+    print("[OK] test_search_files_max_matches passed")
+
+
+def test_set_proposed_entities_with_evidence():
+    """Test that grounding evidence fields are stored correctly."""
+    state = {}
+    evidence = {
+        "search_patterns": ["defect", "defective", "flaw"],
+        "total_mentions": 23,
+        "example_excerpts": [
+            "The defect was obvious upon opening",
+            "Manufacturing defect caused the leg to crack",
+            "Multiple defects in a single order",
+        ],
+        "files_with_evidence": 2,
+    }
+    entity_types = [
+        {
+            "name": "Defect",
+            "source": "discovered",
+            "description": "Product defects reported by customers",
+            "grounding_evidence": evidence,
+        },
+    ]
+
+    result = handle_set_proposed_entities(state, entity_types)
+
+    assert result["status"] == "success", f"Expected success, got {result}"
+    stored = state["proposed_entity_types"]["Defect"]
+    assert "grounding_evidence" in stored, "Evidence not stored"
+    ev = stored["grounding_evidence"]
+    assert ev["search_patterns"] == ["defect", "defective", "flaw"]
+    assert ev["total_mentions"] == 23
+    assert len(ev["example_excerpts"]) == 3
+    assert ev["files_with_evidence"] == 2
+    print("[OK] test_set_proposed_entities_with_evidence passed")
+
+
+def test_set_proposed_entities_without_evidence():
+    """Test that grounding evidence is optional (well-known types don't need it)."""
+    state = {}
+    entity_types = [
+        {
+            "name": "Product",
+            "source": "well_known",
+            "description": "Products from the graph schema",
+        },
+        {
+            "name": "Supplier",
+            "source": "well_known",
+            "description": "Suppliers from the graph schema",
+        },
+    ]
+
+    result = handle_set_proposed_entities(state, entity_types)
+
+    assert result["status"] == "success", f"Expected success, got {result}"
+    assert len(state["proposed_entity_types"]) == 2
+    assert "grounding_evidence" not in state["proposed_entity_types"]["Product"]
+    assert "grounding_evidence" not in state["proposed_entity_types"]["Supplier"]
+    print("[OK] test_set_proposed_entities_without_evidence passed")
+
+
 if __name__ == "__main__":
     print("Running extraction tools unit tests...\n")
 
@@ -250,5 +458,12 @@ if __name__ == "__main__":
     test_build_structured_preview()
     test_build_markdown_context()
     test_build_well_known_types()
+    test_search_files_basic()
+    test_search_files_no_matches()
+    test_search_files_specific_file()
+    test_search_files_case_insensitive()
+    test_search_files_max_matches()
+    test_set_proposed_entities_with_evidence()
+    test_set_proposed_entities_without_evidence()
 
     print("\n=== All tests passed! ===")
