@@ -53,16 +53,14 @@ def get_neo4j_driver(
             "NEO4J_PASSWORD is required. Set environment variable or pass as parameter."
         )
 
-    # Determine if encryption is needed (cloud instances)
-    encrypted = uri.startswith("neo4j+s://") or uri.startswith("bolt+s://")
-
     # Create driver with connection pooling
+    # Note: Encryption is automatically enabled for neo4j+s:// and bolt+s:// URIs.
+    # Do NOT pass encrypted= parameter with these URIs (it will cause an error).
     try:
         driver = GraphDatabase.driver(
             uri,
             auth=(user, password),
             max_connection_pool_size=50,
-            encrypted=encrypted,
         )
 
         # Verify connectivity

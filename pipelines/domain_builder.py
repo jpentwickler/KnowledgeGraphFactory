@@ -9,13 +9,22 @@ Based on patterns from neo4j-contrib/mcp-neo4j-data-modeling.
 """
 
 import os
-from pathlib import Path
 from typing import Optional
 
 import pandas as pd
 from neo4j import Driver
 
 from tools.file_tools import _get_data_dir
+
+
+# Rows per UNWIND batch — balances transaction size vs network round-trips
+BATCH_SIZE = 500
+
+
+def _batched(items: list, size: int):
+    """Yield successive chunks of items."""
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
 
 
 def validate_csv_uniqueness(csv_path: str, unique_column: str) -> dict:
@@ -147,7 +156,10 @@ def create_unique_constraint(driver: Driver, label: str, unique_col: str) -> Non
 
 
 def import_nodes(driver: Driver, spec: dict, data_dir: str) -> dict:
-    """Import nodes from CSV using LOAD CSV + MERGE pattern.
+    """Import nodes from CSV using parameterized UNWIND + MERGE.
+
+    Python reads CSV locally, sends data to Neo4j as parameters.
+    Works with both local and cloud (Aura) Neo4j instances.
 
     Layer 3 - idempotent import using MERGE.
 
@@ -166,31 +178,34 @@ def import_nodes(driver: Driver, spec: dict, data_dir: str) -> dict:
     label = spec["label"]
     source_file = spec["source_file"]
     unique_col = spec["unique_column_name"]
-
-    # Build file URI for LOAD CSV
-    # Neo4j requires file:/// protocol for local files
     csv_path = os.path.join(data_dir, source_file)
-    file_uri = Path(csv_path).as_uri()
-
-    # MERGE query pattern
-    query = f"""
-    LOAD CSV WITH HEADERS FROM '{file_uri}' AS row
-    MERGE (n:{label} {{{unique_col}: trim(row.{unique_col})}})
-    SET n += row
-    RETURN count(n) as created
-    """
 
     try:
-        with driver.session() as session:
-            result = session.run(query)
-            record = result.single()
-            count = record["created"] if record else 0
+        # Python reads CSV locally
+        df = pd.read_csv(csv_path)
+        rows = df.where(df.notna(), None).to_dict("records")
 
-            return {
-                "label": label,
-                "count": count,
-                "errors": [],
-            }
+        # Generic UNWIND query — works for ANY node type
+        query = f"""
+        UNWIND $rows AS row
+        MERGE (n:{label} {{{unique_col}: trim(toString(row.{unique_col}))}})
+        SET n += row
+        RETURN count(n) as created
+        """
+
+        # Send in batches for large files
+        total = 0
+        for batch in _batched(rows, BATCH_SIZE):
+            with driver.session() as session:
+                result = session.run(query, {"rows": batch})
+                record = result.single()
+                total += record["created"] if record else 0
+
+        return {
+            "label": label,
+            "count": total,
+            "errors": [],
+        }
 
     except Exception as exc:
         return {
@@ -201,7 +216,10 @@ def import_nodes(driver: Driver, spec: dict, data_dir: str) -> dict:
 
 
 def import_relationships(driver: Driver, spec: dict, data_dir: str) -> dict:
-    """Import relationships from CSV using LOAD CSV + MERGE pattern.
+    """Import relationships from CSV using parameterized UNWIND + MERGE.
+
+    Python reads CSV locally, sends data to Neo4j as parameters.
+    Works with both local and cloud (Aura) Neo4j instances.
 
     CRITICAL: Must run SERIALLY (not parallel) to avoid deadlocks.
 
@@ -224,36 +242,37 @@ def import_relationships(driver: Driver, spec: dict, data_dir: str) -> dict:
     from_col = spec["from_node_column"]
     to_label = spec["to_node_label"]
     to_col = spec["to_node_column"]
-
-    # Build file URI
     csv_path = os.path.join(data_dir, source_file)
-    file_uri = Path(csv_path).as_uri()
-
-    # MERGE query pattern
-    query = f"""
-    LOAD CSV WITH HEADERS FROM '{file_uri}' AS row
-    MATCH (from:{from_label} {{{from_col}: trim(row.{from_col})}})
-    MATCH (to:{to_label} {{{to_col}: trim(row.{to_col})}})
-    MERGE (from)-[r:{rel_type}]->(to)
-    SET r += row
-    RETURN count(r) as created
-    """
 
     try:
-        # Import relationships
-        with driver.session() as session:
-            result = session.run(query)
-            record = result.single()
-            created_count = record["created"] if record else 0
-
-        # Count expected relationships (CSV rows)
+        # Python reads CSV locally
         df = pd.read_csv(csv_path)
         expected_count = len(df)
-        orphan_count = expected_count - created_count
+        rows = df.where(df.notna(), None).to_dict("records")
+
+        # Generic UNWIND query — works for ANY relationship type
+        query = f"""
+        UNWIND $rows AS row
+        MATCH (from:{from_label} {{{from_col}: trim(toString(row.{from_col}))}})
+        MATCH (to:{to_label} {{{to_col}: trim(toString(row.{to_col}))}})
+        MERGE (from)-[r:{rel_type}]->(to)
+        SET r += row
+        RETURN count(r) as created
+        """
+
+        # Send in batches, serial to avoid deadlocks
+        total = 0
+        for batch in _batched(rows, BATCH_SIZE):
+            with driver.session() as session:
+                result = session.run(query, {"rows": batch})
+                record = result.single()
+                total += record["created"] if record else 0
+
+        orphan_count = expected_count - total
 
         return {
             "type": rel_type,
-            "count": created_count,
+            "count": total,
             "orphans": orphan_count,
             "errors": [],
         }
@@ -338,8 +357,8 @@ def build_domain_graph(state: dict, driver: Driver) -> dict:
     Implements the three-step process:
     1. Validate all CSV files (pre-import layer)
     2. Create NODE KEY constraints (database layer)
-    3. Import nodes via LOAD CSV + MERGE
-    4. Import relationships via LOAD CSV + MERGE (serial)
+    3. Import nodes via UNWIND + MERGE
+    4. Import relationships via UNWIND + MERGE (serial)
     5. Verify import
 
     Args:
