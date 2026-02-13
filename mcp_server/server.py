@@ -554,138 +554,49 @@ def _format_rel_results(rels: list[dict]) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool
-def kg_build_graph(message: str = "build") -> dict:
-    """Build the knowledge graph in Neo4j from approved artifacts.
-
-    This tool executes the graph construction pipeline, importing structured
-    CSV data into Neo4j according to the approved construction plan.
-
-    The build process:
-    1. Validates all CSV files (duplicates, nulls, whitespace)
-    2. Creates NODE KEY constraints for uniqueness + indexing
-    3. Imports nodes via LOAD CSV + MERGE
-    4. Imports relationships via LOAD CSV + MATCH + MERGE
-    5. Verifies graph construction (node/relationship counts)
-
-    Prerequisites:
-    - Stage 3 must be completed (approved_construction_plan)
-    - Neo4j instance must be running and accessible
-    - Environment variables must be set (NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD)
-
-    Note: Currently builds the Domain Graph only (CSV → Neo4j).
-    Text processing (Subject/Lexical graphs) will be added in a future update.
-
-    Args:
-        message: Optional user message (e.g., "build the graph", "start")
+def _build_structured(state, driver, conn_info):
+    """Build domain graph from CSVs (existing US008 behavior).
 
     Returns:
-        Dictionary with build results, verification stats, and any errors.
+        dict with agent_response and status.
     """
-    state = _load_clean_state()
+    from pipelines import build_domain_graph
 
-    # Check prerequisites
+    neo4j_uri = os.environ.get("NEO4J_URI", "")
+
     if "approved_construction_plan" not in state:
         return {
             "agent_response": (
-                "Cannot build graph: No approved construction plan found.\n\n"
+                "Cannot build structured graph: No approved construction plan.\n\n"
                 "Please complete Stage 3 (Schema Proposal) first:\n"
                 "1. Use kg_schema_proposal to design the schema\n"
                 "2. Use kg_critic with scope='structured' to validate\n"
                 "3. Approve the construction plan"
             ),
-            "status": {
-                "success": False,
-                "error": "missing_construction_plan"
-            }
+            "status": {"success": False, "error": "missing_construction_plan"},
         }
 
-    # Check Neo4j environment variables
-    neo4j_uri = os.environ.get("NEO4J_URI")
-    neo4j_user = os.environ.get("NEO4J_USER")
-    neo4j_password = os.environ.get("NEO4J_PASSWORD")
+    results = build_domain_graph(state, driver)
 
-    if not all([neo4j_uri, neo4j_user, neo4j_password]):
+    if results["errors"]:
+        error_summary = "\n".join(f"  - {err}" for err in results["errors"])
         return {
             "agent_response": (
-                "Cannot build graph: Neo4j credentials not configured.\n\n"
-                "Please set these environment variables in your .mcp.json:\n"
-                "- NEO4J_URI (e.g., neo4j+s://xxxxx.databases.neo4j.io)\n"
-                "- NEO4J_USER (e.g., neo4j)\n"
-                "- NEO4J_PASSWORD (your password)"
+                f"Domain graph build completed with errors:\n\n{error_summary}\n\n"
+                "Please review the errors and fix any data issues before retrying."
             ),
             "status": {
                 "success": False,
-                "error": "missing_neo4j_credentials"
-            }
+                "errors": results["errors"],
+                "verification": results.get("verification", {}),
+            },
         }
 
-    # Import domain builder
-    try:
-        from pipelines import build_domain_graph
-        from utils import get_neo4j_driver, test_connection, close_driver
-    except ImportError as exc:
-        return {
-            "agent_response": f"Failed to import graph builder modules: {exc}",
-            "status": {
-                "success": False,
-                "error": "import_error"
-            }
-        }
+    verification = results["verification"]
+    neo4j_version = conn_info.get("neo4j_version", "unknown")
+    database = conn_info.get("database", "neo4j")
 
-    # Connect to Neo4j
-    try:
-        driver = get_neo4j_driver()
-        conn_info = test_connection(driver)
-        neo4j_version = conn_info.get("neo4j_version", "unknown")
-        database = conn_info.get("database", "neo4j")
-    except Exception as exc:
-        return {
-            "agent_response": (
-                f"Failed to connect to Neo4j: {exc}\n\n"
-                "Please check:\n"
-                "1. Neo4j instance is running\n"
-                "2. NEO4J_URI is correct\n"
-                "3. Credentials are valid\n"
-                "4. Network connectivity"
-            ),
-            "status": {
-                "success": False,
-                "error": "neo4j_connection_failed",
-                "details": str(exc)
-            }
-        }
-
-    # Build domain graph
-    try:
-        results = build_domain_graph(state, driver)
-
-        # Close Neo4j connection
-        close_driver(driver)
-
-        # Check for errors
-        if results["errors"]:
-            error_summary = "\n".join(f"  - {err}" for err in results["errors"])
-            response = f"""
-Graph build completed with errors:
-
-{error_summary}
-
-Please review the errors and fix any data issues before retrying.
-"""
-            return {
-                "agent_response": response,
-                "status": {
-                    "success": False,
-                    "errors": results["errors"],
-                    "verification": results.get("verification", {})
-                }
-            }
-
-        # Success!
-        verification = results["verification"]
-        response = f"""
-Domain Graph built successfully!
+    response = f"""Domain Graph built successfully!
 
 Connected to Neo4j {neo4j_version} (database: {database})
 
@@ -704,38 +615,346 @@ Verification:
 {chr(10).join(f"    {label}: {count}" for label, count in verification['node_counts'].items())}
 
   Relationship counts by type:
-{chr(10).join(f"    {rel_type}: {count}" for rel_type, count in verification['relationship_counts'].items())}
+{chr(10).join(f"    {rel_type}: {count}" for rel_type, count in verification['relationship_counts'].items())}"""
 
-You can explore the graph in Neo4j Browser at: {neo4j_uri.replace('neo4j+s://', 'https://').replace('bolt://', 'http://').split(':')[0]}:7474
+    return {
+        "agent_response": response,
+        "status": {
+            "success": True,
+            "neo4j_version": neo4j_version,
+            "database": database,
+            "verification": verification,
+            "node_import": results["nodes"],
+            "relationship_import": results["relationships"],
+        },
+    }
 
-Useful queries:
-  // View all nodes
-  MATCH (n) RETURN n LIMIT 25
 
-  // Check schema
-  CALL db.schema.visualization()
+async def _build_unstructured(state, driver, message):
+    """Build subject + lexical graphs from markdown files.
 
-  // Count all entities
-  MATCH (n) RETURN labels(n) as label, count(*) as count
-"""
+    Returns:
+        dict with agent_response and status.
+    """
+    from pipelines import build_text_graph
 
+    # Check prerequisites
+    if "approved_entity_types" not in state:
         return {
-            "agent_response": response,
-            "status": {
-                "success": True,
-                "neo4j_version": neo4j_version,
-                "database": database,
-                "verification": verification,
-                "node_import": results["nodes"],
-                "relationship_import": results["relationships"]
-            }
+            "agent_response": (
+                "Cannot build text graph: No approved entity types.\n\n"
+                "Please complete Stage 4 (NER Extraction) first."
+            ),
+            "status": {"success": False, "error": "missing_entity_types"},
         }
 
+    if "approved_fact_types" not in state:
+        return {
+            "agent_response": (
+                "Cannot build text graph: No approved fact types.\n\n"
+                "Please complete Stage 5 (Fact Extraction) first."
+            ),
+            "status": {"success": False, "error": "missing_fact_types"},
+        }
+
+    unstructured = state.get("approved_files", {}).get("unstructured", [])
+    if not unstructured:
+        return {
+            "agent_response": (
+                "Cannot build text graph: No unstructured files in approved_files.\n\n"
+                "Stage 2 (File Suggestion) must include markdown files."
+            ),
+            "status": {"success": False, "error": "no_unstructured_files"},
+        }
+
+    if not os.environ.get("OPENAI_API_KEY"):
+        return {
+            "agent_response": (
+                "Cannot build text graph: OPENAI_API_KEY not set.\n\n"
+                "Required for entity extraction (GPT-4o) and embeddings.\n"
+                "Set OPENAI_API_KEY in your environment or .mcp.json."
+            ),
+            "status": {"success": False, "error": "missing_openai_key"},
+        }
+
+    results = await build_text_graph(state, driver, message)
+    _save_state(state)  # Persist text_graph_progress
+
+    processed = results["files_processed"]
+    errors = results["errors"]
+    progress = results["progress"]
+
+    if not processed and not errors:
+        return {
+            "agent_response": (
+                "All markdown files have already been processed.\n\n"
+                f"Total processed: {progress['total_processed']}\n"
+                f"Pending: {progress['total_pending']}"
+            ),
+            "status": {"success": True, "already_complete": True, "progress": progress},
+        }
+
+    per_file = results.get("per_file_results", [])
+
+    lines = ["Text graph processing complete!\n"]
+    if processed:
+        lines.append(f"Files processed: {len(processed)}")
+        for f in processed:
+            # Find diagnostics for this file
+            diag = next((r for r in per_file if r["file"] == f), {})
+            d = diag.get("diagnostics", {})
+            nodes_added = d.get("nodes_added", "?")
+            result_info = diag.get("result", "")
+            lines.append(f"  [OK] {f} (nodes added: {nodes_added})")
+            if result_info:
+                lines.append(f"       result: {result_info[:200]}")
+    if errors:
+        lines.append(f"\nErrors: {len(errors)}")
+        for e in errors:
+            lines.append(f"  [FAIL] {e}")
+        # Show diagnostics for failed files too
+        for r in per_file:
+            if r.get("status") == "error":
+                d = r.get("diagnostics", {})
+                if d:
+                    lines.append(f"       diagnostics: {d}")
+    lines.append(
+        f"\nProgress: {progress['total_processed']} processed, "
+        f"{progress['total_pending']} pending"
+    )
+    if progress["pending_files"]:
+        lines.append("Pending files:")
+        for f in progress["pending_files"]:
+            lines.append(f"  - {f}")
+
+    return {
+        "agent_response": "\n".join(lines),
+        "status": {
+            "success": len(errors) == 0,
+            "files_processed": processed,
+            "errors": errors,
+            "progress": progress,
+            "per_file_results": per_file,
+        },
+    }
+
+
+def _build_resolve(state, driver):
+    """Run entity resolution to link subject graph to domain graph.
+
+    Returns:
+        dict with agent_response and status.
+    """
+    from pipelines import resolve_entities
+
+    results = resolve_entities(state, driver)
+    _save_state(state)  # Persist text_graph_progress.entity_resolution
+
+    labels_checked = results["labels_checked"]
+    labels_resolved = results["labels_resolved"]
+    total = results["total_correspondences"]
+
+    if not labels_checked:
+        return {
+            "agent_response": (
+                "Entity resolution: No entity labels found in the subject graph.\n\n"
+                "Has the text graph been built? Use scope='unstructured' first."
+            ),
+            "status": {"success": False, "error": "no_entity_labels"},
+        }
+
+    lines = ["Entity resolution complete!\n"]
+    lines.append(f"Labels checked: {', '.join(labels_checked)}")
+    if labels_resolved:
+        lines.append(f"Labels resolved: {', '.join(labels_resolved)}")
+    lines.append(f"Total CORRESPONDS_TO relationships: {total}")
+
+    lines.append("\nPer-label results:")
+    for result in results["per_label_results"]:
+        label = result["label"]
+        status = result["status"]
+        if status == "resolved":
+            lines.append(
+                f"  [OK] {label}: {result['entity_key']} <-> {result['domain_key']} "
+                f"(similarity {result['key_similarity']:.2f}), "
+                f"{result['relationships_created']} correspondences"
+            )
+        elif status == "error":
+            lines.append(f"  [FAIL] {label}: {result['error']}")
+        else:
+            lines.append(f"  [SKIP] {label}: {result.get('message', status)}")
+
+    return {
+        "agent_response": "\n".join(lines),
+        "status": {
+            "success": True,
+            "labels_checked": labels_checked,
+            "labels_resolved": labels_resolved,
+            "total_correspondences": total,
+            "per_label_results": results["per_label_results"],
+        },
+    }
+
+
+@mcp.tool
+async def kg_build_graph(message: str = "build", scope: str = "structured") -> dict:
+    """Build the knowledge graph in Neo4j from approved artifacts.
+
+    Args:
+        message: Instructions for the build. For scope="unstructured", controls
+                 which files to process:
+                 - A specific filename (e.g., "gothenburg_table_reviews.md")
+                 - "next" to process the next unprocessed file
+                 - "all" or "remaining" to process all pending files
+        scope: What to build.
+            - "structured" (default): Domain graph from CSVs
+            - "unstructured": Subject + Lexical graphs from markdown files
+            - "resolve": Entity resolution (link Subject to Domain graph)
+            - "all": Everything in sequence (structured -> unstructured -> resolve)
+
+    Returns:
+        Dictionary with build results, verification stats, and any errors.
+    """
+    valid_scopes = ("structured", "unstructured", "resolve", "all")
+    if scope not in valid_scopes:
+        return {
+            "agent_response": (
+                f"Invalid scope: '{scope}'.\n\n"
+                f"Valid scopes: {', '.join(valid_scopes)}\n"
+                "- structured: Build domain graph from CSVs\n"
+                "- unstructured: Build subject + lexical graphs from markdown\n"
+                "- resolve: Link subject graph entities to domain graph nodes\n"
+                "- all: Run all three in sequence"
+            ),
+            "status": {"success": False, "error": "invalid_scope"},
+        }
+
+    state = _load_clean_state()
+
+    # Check Neo4j credentials (needed for all scopes)
+    neo4j_uri = os.environ.get("NEO4J_URI")
+    neo4j_user = os.environ.get("NEO4J_USER")
+    neo4j_password = os.environ.get("NEO4J_PASSWORD")
+
+    if not all([neo4j_uri, neo4j_user, neo4j_password]):
+        return {
+            "agent_response": (
+                "Cannot build graph: Neo4j credentials not configured.\n\n"
+                "Please set these environment variables in your .mcp.json:\n"
+                "- NEO4J_URI (e.g., neo4j+s://xxxxx.databases.neo4j.io)\n"
+                "- NEO4J_USER (e.g., neo4j)\n"
+                "- NEO4J_PASSWORD (your password)"
+            ),
+            "status": {"success": False, "error": "missing_neo4j_credentials"},
+        }
+
+    # Import modules
+    try:
+        from utils import get_neo4j_driver, test_connection, close_driver
+    except ImportError as exc:
+        return {
+            "agent_response": f"Failed to import graph builder modules: {exc}",
+            "status": {"success": False, "error": "import_error"},
+        }
+
+    # Connect to Neo4j
+    try:
+        driver = get_neo4j_driver()
+        conn_info = test_connection(driver)
     except Exception as exc:
-        # Make sure to close driver even on error
+        return {
+            "agent_response": (
+                f"Failed to connect to Neo4j: {exc}\n\n"
+                "Please check:\n"
+                "1. Neo4j instance is running\n"
+                "2. NEO4J_URI is correct\n"
+                "3. Credentials are valid\n"
+                "4. Network connectivity"
+            ),
+            "status": {
+                "success": False,
+                "error": "neo4j_connection_failed",
+                "details": str(exc),
+            },
+        }
+
+    try:
+        if scope == "structured":
+            result = _build_structured(state, driver, conn_info)
+
+        elif scope == "unstructured":
+            result = await _build_unstructured(state, driver, message)
+
+        elif scope == "resolve":
+            result = _build_resolve(state, driver)
+
+        elif scope == "all":
+            # Run all three phases in sequence
+            all_lines = []
+            all_status = {"success": True, "phases": {}}
+
+            # Phase 1: Structured
+            if "approved_construction_plan" in state:
+                all_lines.append("[Phase 1/3] Building domain graph from CSVs...")
+                structured_result = _build_structured(state, driver, conn_info)
+                all_status["phases"]["structured"] = structured_result["status"]
+                all_lines.append(structured_result["agent_response"])
+                if not structured_result["status"].get("success", False):
+                    all_status["success"] = False
+            else:
+                all_lines.append(
+                    "[Phase 1/3] Skipped: No approved construction plan."
+                )
+
+            # Phase 2: Unstructured
+            has_unstructured = bool(
+                state.get("approved_files", {}).get("unstructured", [])
+            )
+            has_entities = "approved_entity_types" in state
+            has_facts = "approved_fact_types" in state
+            has_openai = bool(os.environ.get("OPENAI_API_KEY"))
+
+            if has_unstructured and has_entities and has_facts and has_openai:
+                all_lines.append(
+                    "\n[Phase 2/3] Building text graph from markdown files..."
+                )
+                unstructured_result = await _build_unstructured(state, driver, "all")
+                all_status["phases"]["unstructured"] = unstructured_result["status"]
+                all_lines.append(unstructured_result["agent_response"])
+                if not unstructured_result["status"].get("success", False):
+                    all_status["success"] = False
+            else:
+                missing = []
+                if not has_unstructured:
+                    missing.append("unstructured files")
+                if not has_entities:
+                    missing.append("approved entity types")
+                if not has_facts:
+                    missing.append("approved fact types")
+                if not has_openai:
+                    missing.append("OPENAI_API_KEY")
+                all_lines.append(
+                    f"\n[Phase 2/3] Skipped: Missing {', '.join(missing)}."
+                )
+
+            # Phase 3: Entity Resolution
+            all_lines.append("\n[Phase 3/3] Running entity resolution...")
+            resolve_result = _build_resolve(state, driver)
+            all_status["phases"]["resolve"] = resolve_result["status"]
+            all_lines.append(resolve_result["agent_response"])
+
+            result = {
+                "agent_response": "\n".join(all_lines),
+                "status": all_status,
+            }
+
+        close_driver(driver)
+        return result
+
+    except Exception as exc:
         try:
             close_driver(driver)
-        except:
+        except Exception:
             pass
 
         return {
@@ -744,14 +963,15 @@ Useful queries:
                 "This may be due to:\n"
                 "- Invalid CSV data (duplicates, missing values)\n"
                 "- Neo4j connection issues\n"
-                "- Permission problems\n\n"
+                "- Missing OPENAI_API_KEY for text processing\n"
+                "- Missing APOC plugin for entity resolution\n\n"
                 "Check the error message above for details."
             ),
             "status": {
                 "success": False,
                 "error": "build_failed",
-                "details": str(exc)
-            }
+                "details": str(exc),
+            },
         }
 
 

@@ -2,7 +2,7 @@
 
 Implements three-layer validation approach:
 1. CSV validation (pre-import)
-2. Database constraints (NODE KEY)
+2. Database constraints (UNIQUE)
 3. MERGE queries (idempotent imports)
 
 Based on patterns from neo4j-contrib/mcp-neo4j-data-modeling.
@@ -124,18 +124,17 @@ def validate_csv_uniqueness(csv_path: str, unique_column: str) -> dict:
 
 
 def create_unique_constraint(driver: Driver, label: str, unique_col: str) -> None:
-    """Create NODE KEY constraint for uniqueness + existence + index.
+    """Create UNIQUE constraint for uniqueness + index.
 
     Layer 2 validation - database-level enforcement.
 
-    Pattern from neo4j-contrib/mcp-neo4j-data-modeling:
-    CREATE CONSTRAINT {label}_{col}_key IF NOT EXISTS
-    FOR (n:{label})
-    REQUIRE (n.{col}) IS NODE KEY
+    Uses UNIQUE (not NODE KEY) so that text-extracted entities with
+    the same label but without the unique property are not rejected.
+    CSV-sourced nodes always have the property (validated by pandas),
+    so uniqueness is still enforced for domain graph nodes.
 
-    NODE KEY provides:
-    - Uniqueness enforcement (no duplicate values)
-    - Existence enforcement (no null values)
+    UNIQUE provides:
+    - Uniqueness enforcement (no duplicate values when property exists)
     - Automatic range index (fast MERGE lookups)
 
     Args:
@@ -143,12 +142,12 @@ def create_unique_constraint(driver: Driver, label: str, unique_col: str) -> Non
         label: Node label (e.g., "Product")
         unique_col: Property name (e.g., "product_id")
     """
-    constraint_name = f"{label}_{unique_col}_key".lower()
+    constraint_name = f"{label}_{unique_col}_unique".lower()
 
     query = f"""
     CREATE CONSTRAINT {constraint_name} IF NOT EXISTS
     FOR (n:{label})
-    REQUIRE (n.{unique_col}) IS NODE KEY
+    REQUIRE (n.{unique_col}) IS UNIQUE
     """
 
     with driver.session() as session:
@@ -419,7 +418,7 @@ def build_domain_graph(state: dict, driver: Driver) -> dict:
         print(f"[OK]")
 
     # Step 2: Create all constraints
-    print("\n[2/5] Creating NODE KEY constraints...")
+    print("\n[2/5] Creating UNIQUE constraints...")
     for name, spec in plan.items():
         if spec["construction_type"] == "node":
             label = spec["label"]

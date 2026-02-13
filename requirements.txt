@@ -11,11 +11,14 @@ neo4j>=5.0.0
 # Data validation (for Stage 6)
 pandas>=2.0.0
 
-# Optional: Neo4j GraphRAG for entity extraction (Stage 6)
-# neo4j-graphrag>=0.1.0
+# Neo4j GraphRAG for entity extraction + subject/lexical graph (US009)
+neo4j-graphrag>=1.0.0
 
-# Optional: Fuzzy string matching for entity resolution (Stage 6)
-# rapidfuzz>=3.0.0
+# Fuzzy string matching for entity resolution (US009)
+rapidfuzz>=3.0.0
+
+# Required by neo4j-graphrag for LLM + embeddings (US009)
+openai>=1.0.0
 
 # Development
 pytest>=7.0.0
