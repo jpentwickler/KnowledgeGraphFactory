@@ -239,10 +239,11 @@ class TestAgentRunner:
 
     def test_run_agent_sync_with_tool_call(self):
         """Test agent handles tool calls correctly."""
+        from anthropic.types import ToolUseBlock
         from core.agent import run_agent_sync
 
-        # First response: tool call
-        mock_tool_block = MagicMock()
+        # First response: tool call (use spec to prevent phantom .text attribute)
+        mock_tool_block = MagicMock(spec=ToolUseBlock)
         mock_tool_block.type = "tool_use"
         mock_tool_block.name = "echo"
         mock_tool_block.input = {"text": "hello"}
@@ -261,7 +262,8 @@ class TestAgentRunner:
         mock_response2.content = [mock_text_block]
         mock_response2.stop_reason = "end_turn"
 
-        with patch('core.agent.anthropic.Anthropic') as MockClient:
+        with patch('core.agent.wrap_anthropic', side_effect=lambda c: c), \
+             patch('core.agent.anthropic.Anthropic') as MockClient:
             mock_client = MockClient.return_value
             mock_client.messages.create.side_effect = [mock_response1, mock_response2]
 
@@ -293,10 +295,11 @@ class TestAgentRunner:
 
     def test_run_agent_sync_tool_error_handling(self):
         """Test agent handles tool errors gracefully."""
+        from anthropic.types import ToolUseBlock
         from core.agent import run_agent_sync
 
-        # First response: tool call
-        mock_tool_block = MagicMock()
+        # First response: tool call (use spec to prevent phantom .text attribute)
+        mock_tool_block = MagicMock(spec=ToolUseBlock)
         mock_tool_block.type = "tool_use"
         mock_tool_block.name = "failing_tool"
         mock_tool_block.input = {}
@@ -315,7 +318,8 @@ class TestAgentRunner:
         mock_response2.content = [mock_text_block]
         mock_response2.stop_reason = "end_turn"
 
-        with patch('core.agent.anthropic.Anthropic') as MockClient:
+        with patch('core.agent.wrap_anthropic', side_effect=lambda c: c), \
+             patch('core.agent.anthropic.Anthropic') as MockClient:
             mock_client = MockClient.return_value
             mock_client.messages.create.side_effect = [mock_response1, mock_response2]
 

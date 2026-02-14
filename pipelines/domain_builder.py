@@ -14,6 +14,7 @@ from typing import Optional
 import pandas as pd
 from neo4j import Driver
 
+from core.tracing import traceable
 from tools.file_tools import _get_data_dir
 
 
@@ -350,6 +351,7 @@ def verify_import(driver: Driver) -> dict:
         }
 
 
+@traceable(name="pipeline.build_domain_graph")
 def build_domain_graph(state: dict, driver: Driver) -> dict:
     """Build the Domain Graph layer from structured CSV data.
 

@@ -20,6 +20,9 @@ rapidfuzz>=3.0.0
 # Required by neo4j-graphrag for LLM + embeddings (US009)
 openai>=1.0.0
 
+# Observability (optional -- tracing activates when LANGSMITH_TRACING=true)
+langsmith>=0.3.0
+
 # Development
 pytest>=7.0.0
 pytest-asyncio>=0.21.0

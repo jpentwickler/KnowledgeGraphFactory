@@ -8,6 +8,7 @@ Follows the same conversational pattern as NerExtractionAgent and other agents.
 """
 
 from core import run_agent_sync, get_approved
+from core.tracing import traceable
 from tools.extraction_tools import (
     TOOL_ADD_PROPOSED_FACT,
     TOOL_REMOVE_PROPOSED_FACT,
@@ -148,6 +149,7 @@ class FactExtractionAgent:
             "approve_proposed_facts": handle_approve_proposed_facts,
         }
 
+    @traceable(name="fact_extraction.run")
     def run(
         self, message: str, state: dict, conversation: list = None
     ) -> tuple[str, dict, list]:

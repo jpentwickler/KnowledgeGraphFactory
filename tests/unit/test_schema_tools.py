@@ -63,7 +63,7 @@ _tmp_dir = None
 _old_env = None
 
 
-def setup():
+def setup_module():
     """Create temp data directory and set KG_DATA_DIR."""
     global _tmp_dir, _old_env
     _tmp_dir = tempfile.mkdtemp()
@@ -72,7 +72,7 @@ def setup():
     _create_test_data(_tmp_dir)
 
 
-def teardown():
+def teardown_module():
     """Remove temp directory and restore env."""
     global _tmp_dir, _old_env
     if _tmp_dir and os.path.exists(_tmp_dir):

@@ -10,6 +10,7 @@ from typing import Callable
 import anthropic
 
 from .tools import execute_tool, format_tool_result, format_tool_error
+from .tracing import wrap_anthropic
 
 
 async def run_agent(
@@ -43,7 +44,7 @@ async def run_agent(
         - state: Updated state dictionary
         - conversation: Updated conversation history for multi-turn
     """
-    client = anthropic.Anthropic()
+    client = wrap_anthropic(anthropic.Anthropic())
 
     # Initialize or continue conversation
     if conversation is None:
@@ -142,7 +143,7 @@ def run_agent_sync(
 
     See run_agent for full documentation.
     """
-    client = anthropic.Anthropic()
+    client = wrap_anthropic(anthropic.Anthropic())
 
     # Initialize or continue conversation
     if conversation is None:

@@ -19,6 +19,24 @@ sys.path.insert(0, _root_dir)
 from dotenv import load_dotenv
 load_dotenv(os.path.join(_root_dir, ".env"))
 
+# Pre-cache langsmith runtime env BEFORE FastMCP takes over stdin/stdout.
+# Langsmith's @traceable calls _insert_runtime_env() which invokes exec_git()
+# (subprocess.check_output). On Windows, child processes inherit stdin, and
+# when FastMCP uses stdio transport the stdin handle is managed by
+# ProactorEventLoop's IOCP -- causing subprocess calls to deadlock.
+# Calling these lru_cached functions early caches the results so subsequent
+# calls during tracing never spawn subprocesses.
+if os.environ.get("LANGSMITH_TRACING", "").lower() == "true":
+    try:
+        from langsmith.env._runtime_env import (
+            get_runtime_environment,
+            get_langchain_env_var_metadata,
+        )
+        get_runtime_environment()
+        get_langchain_env_var_metadata()
+    except Exception:
+        pass
+
 from fastmcp import FastMCP
 
 from agents import (
@@ -30,6 +48,7 @@ from agents import (
     FactExtractionAgent,
 )
 from core import load_state, save_state
+from core.tracing import mcp_traceable
 
 
 # Create MCP server
@@ -190,6 +209,7 @@ def _save_state(state: dict) -> None:
 
 
 @mcp.tool
+@mcp_traceable(name="mcp.kg_get_state")
 def kg_get_state() -> dict:
     """Get current KG-Factory pipeline state.
 
@@ -205,6 +225,7 @@ def kg_get_state() -> dict:
 
 
 @mcp.tool
+@mcp_traceable(name="mcp.kg_user_intent")
 def kg_user_intent(message: str) -> dict:
     """Send a message to the User Intent Agent.
 
@@ -246,6 +267,7 @@ def kg_user_intent(message: str) -> dict:
 
 
 @mcp.tool
+@mcp_traceable(name="mcp.kg_file_suggestion")
 def kg_file_suggestion(message: str) -> dict:
     """Send a message to the File Suggestion Agent.
 
@@ -288,6 +310,7 @@ def kg_file_suggestion(message: str) -> dict:
 
 
 @mcp.tool
+@mcp_traceable(name="mcp.kg_schema_proposal")
 def kg_schema_proposal(message: str) -> dict:
     """Send a message to the Schema Proposal Agent.
 
@@ -342,6 +365,7 @@ def kg_schema_proposal(message: str) -> dict:
 
 
 @mcp.tool
+@mcp_traceable(name="mcp.kg_critic")
 def kg_critic(scope: str = "structured") -> dict:
     """Run the critic agent to review proposed artifacts for problems.
 
@@ -409,6 +433,7 @@ def kg_critic(scope: str = "structured") -> dict:
 
 
 @mcp.tool
+@mcp_traceable(name="mcp.kg_ner_extraction")
 def kg_ner_extraction(message: str) -> dict:
     """Send a message to the NER Extraction Agent.
 
@@ -469,6 +494,7 @@ def kg_ner_extraction(message: str) -> dict:
 
 
 @mcp.tool
+@mcp_traceable(name="mcp.kg_fact_extraction")
 def kg_fact_extraction(message: str) -> dict:
     """Send a message to the Fact Extraction Agent.
 
@@ -554,6 +580,7 @@ def _format_rel_results(rels: list[dict]) -> str:
     return "\n".join(lines)
 
 
+@mcp_traceable(name="mcp._build_structured")
 def _build_structured(state, driver, conn_info):
     """Build domain graph from CSVs (existing US008 behavior).
 
@@ -630,6 +657,7 @@ Verification:
     }
 
 
+@mcp_traceable(name="mcp._build_unstructured")
 async def _build_unstructured(state, driver, message):
     """Build subject + lexical graphs from markdown files.
 
@@ -739,6 +767,7 @@ async def _build_unstructured(state, driver, message):
     }
 
 
+@mcp_traceable(name="mcp._build_resolve")
 def _build_resolve(state, driver):
     """Run entity resolution to link subject graph to domain graph.
 
@@ -797,6 +826,7 @@ def _build_resolve(state, driver):
 
 
 @mcp.tool
+@mcp_traceable(name="mcp.kg_build_graph")
 async def kg_build_graph(message: str = "build", scope: str = "structured") -> dict:
     """Build the knowledge graph in Neo4j from approved artifacts.
 
@@ -976,6 +1006,7 @@ async def kg_build_graph(message: str = "build", scope: str = "structured") -> d
 
 
 @mcp.tool
+@mcp_traceable(name="mcp.kg_reset_state")
 def kg_reset_state() -> dict:
     """Reset the KG-Factory state to start fresh.
 

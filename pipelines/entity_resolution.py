@@ -11,6 +11,7 @@ Requires APOC plugin installed in Neo4j for apoc.text.jaroWinklerDistance.
 
 import re
 
+from core.tracing import traceable
 from neo4j import Driver
 from rapidfuzz import fuzz
 
@@ -206,6 +207,7 @@ def correlate_subject_and_domain_nodes(
     }
 
 
+@traceable(name="pipeline.resolve_entities")
 def resolve_entities(state: dict, driver: Driver) -> dict:
     """Full entity resolution pipeline.
 

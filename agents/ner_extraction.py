@@ -9,6 +9,7 @@ and SchemaProposalAgent.
 """
 
 from core import run_agent_sync, get_approved
+from core.tracing import traceable
 from tools.extraction_tools import (
     TOOL_SET_PROPOSED_ENTITIES,
     TOOL_GET_PROPOSED_ENTITIES,
@@ -199,6 +200,7 @@ class NerExtractionAgent:
             "approve_proposed_entities": handle_approve_proposed_entities,
         }
 
+    @traceable(name="ner_extraction.run")
     def run(
         self, message: str, state: dict, conversation: list = None
     ) -> tuple[str, dict, list]:

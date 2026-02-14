@@ -1,6 +1,7 @@
 """File Suggestion Agent - classifies data files for the knowledge graph pipeline."""
 
 from core import run_agent_sync
+from core.tracing import traceable
 from tools import (
     TOOL_GET_APPROVED_USER_GOAL,
     TOOL_LIST_AVAILABLE_FILES,
@@ -90,6 +91,7 @@ class FileSuggestionAgent:
         self.tools = TOOLS
         self.tool_handlers = TOOL_HANDLERS
 
+    @traceable(name="file_suggestion.run")
     def run(self, message: str, state: dict, conversation: list = None) -> tuple[str, dict, list]:
         """Run a conversation turn with the agent.
 

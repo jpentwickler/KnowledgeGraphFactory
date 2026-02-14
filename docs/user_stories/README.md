@@ -91,3 +91,11 @@ All user stories must meet these criteria before being considered complete:
 | [US001](US001_core_agent_framework.md) | Core Agent Framework | 5 | Not Started |
 | [US002](US002_user_intent_agent.md) | User Intent Agent | 3 | Not Started |
 | [US003](US003_mcp_server_user_intent.md) | MCP Server with User Intent | 5 | Not Started |
+| [US004](US004_file_suggestion_agent.md) | File Suggestion Agent | 3 | Not Started |
+| [US005](US005_schema_proposal_agent.md) | Schema Proposal Agent | 5 | Not Started |
+| [US006](US006_ner_extraction_agent.md) | NER Extraction Agent | 3 | Not Started |
+| [US007](US007_fact_extraction_agent.md) | Fact Extraction Agent | 3 | Not Started |
+| [US008](US008_graph_builder.md) | Domain Graph Builder | 5 | Not Started |
+| [US009](US009_text_graph_builder.md) | Text Graph Builder | 8 | Not Started |
+| [US010](US010_adaptive_markdown_splitting.md) | Adaptive Markdown Splitting | 3 | Not Started |
+| [US011](US011_langsmith_observability.md) | LangSmith Observability | 3 | Not Started |

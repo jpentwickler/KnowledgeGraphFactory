@@ -1,6 +1,7 @@
 """User Intent Agent - captures user's knowledge graph goals through conversation."""
 
 from core import run_agent_sync
+from core.tracing import traceable
 from tools import (
     TOOL_SET_PROPOSED_GOAL,
     TOOL_APPROVE_PROPOSED_GOAL,
@@ -72,6 +73,7 @@ class UserIntentAgent:
         self.tools = TOOLS
         self.tool_handlers = TOOL_HANDLERS
 
+    @traceable(name="user_intent.run")
     def run(self, message: str, state: dict, conversation: list = None) -> tuple[str, dict, list]:
         """Run a conversation turn with the agent.
 

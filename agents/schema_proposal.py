@@ -9,6 +9,7 @@ Follows the same pattern as UserIntentAgent and FileSuggestionAgent.
 """
 
 from core import run_agent_sync, get_approved
+from core.tracing import traceable
 from tools.schema_tools import (
     TOOL_PROPOSE_NODE_CONSTRUCTION,
     TOOL_PROPOSE_RELATIONSHIP_CONSTRUCTION,
@@ -155,6 +156,7 @@ class SchemaProposalAgent:
         self.tools = TOOLS
         self.tool_handlers = TOOL_HANDLERS
 
+    @traceable(name="schema_proposal.run")
     def run(
         self, message: str, state: dict, conversation: list = None
     ) -> tuple[str, dict, list]:

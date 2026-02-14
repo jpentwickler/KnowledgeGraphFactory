@@ -14,6 +14,8 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+from core.tracing import traceable
+
 from neo4j import Driver
 from neo4j_graphrag.embeddings import OpenAIEmbeddings
 from neo4j_graphrag.experimental.components.pdf_loader import DataLoader
@@ -474,6 +476,7 @@ async def _process_single_file(
         }
 
 
+@traceable(name="pipeline.build_text_graph")
 async def build_text_graph(state: dict, driver: Driver, message: str = "all") -> dict:
     """Build Subject + Lexical graphs from markdown files.
 

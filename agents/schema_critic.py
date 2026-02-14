@@ -13,6 +13,7 @@ No conversation history needed — each validation is independent.
 import json
 
 from core import run_agent_sync, get_approved
+from core.tracing import traceable
 from tools.schema_tools import (
     TOOL_SUBMIT_REVIEW,
     handle_submit_review,
@@ -276,6 +277,7 @@ class SchemaCriticAgent:
         self.tools = [TOOL_SUBMIT_REVIEW]
         self.tool_handlers = {"submit_review": handle_submit_review}
 
+    @traceable(name="schema_critic.run")
     def run(self, state: dict, scope: str = "structured") -> tuple[str, dict]:
         """Run a single-shot validation.
 

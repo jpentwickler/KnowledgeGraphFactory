@@ -7,6 +7,8 @@ and formatting tool results for the Claude API.
 import json
 from typing import Any, Callable
 
+from .tracing import traceable
+
 
 def create_tool_schema(
     name: str,
@@ -45,6 +47,7 @@ def create_tool_schema(
     }
 
 
+@traceable(name="execute_tool")
 def execute_tool(
     tool_handlers: dict[str, Callable],
     tool_name: str,
