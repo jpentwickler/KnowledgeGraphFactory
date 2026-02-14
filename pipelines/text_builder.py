@@ -66,6 +66,111 @@ class RegexTextSplitter(TextSplitter):
         return TextChunks(chunks=chunks)
 
 
+class MarkdownSectionSplitter(TextSplitter):
+    """Split markdown on section headers (any heading level).
+
+    Each chunk contains the heading line followed by its content,
+    up to the next heading of equal or higher level.
+    """
+
+    async def run(self, text: str) -> TextChunks:
+        """Split text on markdown headings, return indexed chunks."""
+        # Split keeping heading lines as separate elements
+        parts = re.split(r"(^#{1,6}\s+.+)$", text, flags=re.MULTILINE)
+
+        # parts alternates: [pre-heading text, heading, content, heading, content, ...]
+        sections = []
+
+        # Anything before the first heading is a preamble
+        preamble = parts[0].strip()
+        if preamble:
+            sections.append(preamble)
+
+        # Reconstruct sections: heading + content
+        for i in range(1, len(parts), 2):
+            heading = parts[i]
+            content = parts[i + 1] if i + 1 < len(parts) else ""
+            section = (heading + "\n" + content).strip()
+            if section:
+                sections.append(section)
+
+        chunks = [
+            TextChunk(text=str(s), index=i) for i, s in enumerate(sections)
+        ]
+        return TextChunks(chunks=chunks)
+
+
+class ParagraphSplitter(TextSplitter):
+    """Split text on paragraph boundaries (double newlines)."""
+
+    async def run(self, text: str) -> TextChunks:
+        """Split text on double newlines, return indexed chunks."""
+        paragraphs = re.split(r"\n\s*\n", text)
+        chunks = [
+            TextChunk(text=str(p.strip()), index=i)
+            for i, p in enumerate(paragraphs)
+            if p.strip()
+        ]
+        return TextChunks(chunks=chunks)
+
+
+def detect_splitting_strategy(file_path: str) -> TextSplitter:
+    """Auto-detect best splitting strategy for a markdown file.
+
+    Inspects the file for structural markers and returns the appropriate
+    splitter:
+    - >=3 horizontal rules (``---``) -> RegexTextSplitter
+    - >=3 markdown headings (``#``) -> MarkdownSectionSplitter
+    - Otherwise -> ParagraphSplitter
+
+    Args:
+        file_path: Absolute path to markdown file.
+
+    Returns:
+        Configured TextSplitter instance.
+    """
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except OSError:
+        # If we can't read the file, fall back to paragraph splitting
+        return ParagraphSplitter()
+
+    hr_count = len(re.findall(r"^---+\s*$", content, re.MULTILINE))
+    heading_count = len(re.findall(r"^#{1,6}\s+", content, re.MULTILINE))
+
+    if hr_count >= 3:
+        return RegexTextSplitter("---")
+    elif heading_count >= 3:
+        return MarkdownSectionSplitter()
+    else:
+        return ParagraphSplitter()
+
+
+def _create_splitter_from_config(config: dict) -> TextSplitter:
+    """Create a TextSplitter from a state configuration dict.
+
+    Args:
+        config: Dict with ``strategy`` key (``"delimiter"``, ``"sections"``,
+                ``"paragraphs"``) and optional ``pattern`` for delimiter strategy.
+
+    Returns:
+        Configured TextSplitter instance.
+    """
+    strategy = config.get("strategy", "delimiter")
+
+    if strategy == "delimiter":
+        pattern = config.get("pattern", "---")
+        return RegexTextSplitter(pattern)
+    elif strategy == "sections":
+        return MarkdownSectionSplitter()
+    elif strategy == "paragraphs":
+        return ParagraphSplitter()
+    else:
+        # Unknown strategy, fall back to paragraph
+        return ParagraphSplitter()
+
+
 def build_entity_schema(state: dict) -> dict:
     """Build entity extraction schema from approved_entity_types and approved_fact_types.
 
@@ -165,15 +270,19 @@ def make_kg_pipeline(
     state: dict,
     neo4j_driver: Driver,
     file_path: str,
-) -> SimpleKGPipeline:
+) -> tuple[SimpleKGPipeline, str]:
     """Build a SimpleKGPipeline configured for a specific file.
 
     Creates the pipeline with:
     - OpenAI GPT-4o for entity extraction
     - OpenAI text-embedding-3-large for chunk embeddings
-    - Custom MarkdownDataLoader + RegexTextSplitter
+    - Custom MarkdownDataLoader + adaptive TextSplitter
     - Entity schema from approved state artifacts
     - Contextualized extraction prompt from file header
+
+    Splitting strategy is determined by:
+    1. ``state["text_splitting"]`` override (if present)
+    2. Auto-detection from file structure (default)
 
     Args:
         state: Pipeline state with approved_entity_types and approved_fact_types.
@@ -181,24 +290,39 @@ def make_kg_pipeline(
         file_path: Absolute path to the markdown file.
 
     Returns:
-        Configured SimpleKGPipeline ready to run.
+        Tuple of (configured SimpleKGPipeline, strategy name string).
     """
     llm = OpenAILLM(model_name="gpt-4o", model_params={"temperature": 0})
     embedder = OpenAIEmbeddings(model="text-embedding-3-large")
     schema = build_entity_schema(state)
     prompt = build_extraction_prompt(file_path)
 
-    return SimpleKGPipeline(
+    # Determine splitting strategy
+    if "text_splitting" in state:
+        splitter = _create_splitter_from_config(state["text_splitting"])
+        strategy_name = state["text_splitting"].get("strategy", "delimiter")
+    else:
+        splitter = detect_splitting_strategy(file_path)
+        # Derive strategy name from splitter type
+        if isinstance(splitter, RegexTextSplitter):
+            strategy_name = "delimiter"
+        elif isinstance(splitter, MarkdownSectionSplitter):
+            strategy_name = "sections"
+        else:
+            strategy_name = "paragraphs"
+
+    pipeline = SimpleKGPipeline(
         llm=llm,
         driver=neo4j_driver,
         embedder=embedder,
         from_pdf=True,
         pdf_loader=MarkdownDataLoader(),
-        text_splitter=RegexTextSplitter("---"),
+        text_splitter=splitter,
         schema=schema,
         prompt_template=prompt,
         perform_entity_resolution=True,
     )
+    return pipeline, strategy_name
 
 
 def _resolve_files_to_process(state: dict, message: str) -> list[str]:
@@ -294,7 +418,7 @@ async def _process_single_file(
     before_counts = _count_neo4j_nodes(neo4j_driver)
 
     try:
-        pipeline = make_kg_pipeline(state, neo4j_driver, full_path)
+        pipeline, strategy_name = make_kg_pipeline(state, neo4j_driver, full_path)
         result = await pipeline.run_async(file_path=str(full_path))
 
         # Diagnostic: count nodes after processing
@@ -321,6 +445,7 @@ async def _process_single_file(
                 "status": "error",
                 "result": result_repr,
                 "error": f"Neo4j writer failed: {writer_error}",
+                "split_strategy": strategy_name,
                 "diagnostics": {
                     "nodes_before": before_counts["total"],
                     "nodes_after": after_counts["total"],
@@ -333,6 +458,7 @@ async def _process_single_file(
             "status": "ok",
             "result": result_repr,
             "error": None,
+            "split_strategy": strategy_name,
             "diagnostics": {
                 "nodes_before": before_counts["total"],
                 "nodes_after": after_counts["total"],
@@ -446,6 +572,7 @@ async def build_text_graph(state: dict, driver: Driver, message: str = "all") ->
                 {
                     "file": file_path,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "split_strategy": file_result.get("split_strategy", "unknown"),
                 }
             )
             if file_path in state["text_graph_progress"]["pending_files"]:

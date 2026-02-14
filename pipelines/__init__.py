@@ -9,7 +9,14 @@ from .domain_builder import (
     verify_import,
 )
 from .entity_resolution import resolve_entities
-from .text_builder import build_entity_schema, build_text_graph
+from .text_builder import (
+    build_entity_schema,
+    build_text_graph,
+    detect_splitting_strategy,
+    MarkdownSectionSplitter,
+    ParagraphSplitter,
+    RegexTextSplitter,
+)
 
 __all__ = [
     "build_domain_graph",
@@ -20,5 +27,9 @@ __all__ = [
     "verify_import",
     "build_text_graph",
     "build_entity_schema",
+    "detect_splitting_strategy",
+    "MarkdownSectionSplitter",
+    "ParagraphSplitter",
+    "RegexTextSplitter",
     "resolve_entities",
 ]

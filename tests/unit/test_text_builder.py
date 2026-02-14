@@ -12,7 +12,18 @@ import pytest
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from pipelines.text_builder import build_entity_schema, _resolve_files_to_process
+import asyncio
+import tempfile
+
+from pipelines.text_builder import (
+    build_entity_schema,
+    _resolve_files_to_process,
+    detect_splitting_strategy,
+    _create_splitter_from_config,
+    MarkdownSectionSplitter,
+    ParagraphSplitter,
+    RegexTextSplitter,
+)
 from pipelines.entity_resolution import normalize_key, correlate_entity_and_domain_keys
 
 
@@ -257,3 +268,197 @@ class TestCorrelateKeys:
             similarity=0.3,
         )
         assert len(result_low) >= len(result_high)
+
+
+# -- Adaptive Splitting: detect_splitting_strategy tests --
+
+
+def _write_temp_file(content: str) -> str:
+    """Write content to a temporary file and return its path."""
+    f = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".md", delete=False, encoding="utf-8"
+    )
+    f.write(content)
+    f.close()
+    return f.name
+
+
+class TestDetectSplittingStrategy:
+    """Test auto-detection of markdown splitting strategy."""
+
+    def test_detect_horizontal_rules(self):
+        """File with >=3 horizontal rules -> RegexTextSplitter."""
+        content = "Review 1\n---\nReview 2\n---\nReview 3\n---\nReview 4"
+        path = _write_temp_file(content)
+        try:
+            splitter = detect_splitting_strategy(path)
+            assert isinstance(splitter, RegexTextSplitter)
+        finally:
+            os.unlink(path)
+
+    def test_detect_headings(self):
+        """File with >=3 headings and no horizontal rules -> MarkdownSectionSplitter."""
+        content = "# Title\n\nIntro\n\n## Section 1\nContent 1\n\n## Section 2\nContent 2\n\n## Section 3\nContent 3"
+        path = _write_temp_file(content)
+        try:
+            splitter = detect_splitting_strategy(path)
+            assert isinstance(splitter, MarkdownSectionSplitter)
+        finally:
+            os.unlink(path)
+
+    def test_detect_paragraphs(self):
+        """File with neither horizontal rules nor headings -> ParagraphSplitter."""
+        content = "First paragraph about something.\n\nSecond paragraph continues.\n\nThird paragraph ends."
+        path = _write_temp_file(content)
+        try:
+            splitter = detect_splitting_strategy(path)
+            assert isinstance(splitter, ParagraphSplitter)
+        finally:
+            os.unlink(path)
+
+    def test_horizontal_rules_take_priority(self):
+        """File with both horizontal rules and headings -> RegexTextSplitter (rules win)."""
+        content = "# Title\n## Section\nContent\n---\nMore\n---\nMore\n---\nEnd"
+        path = _write_temp_file(content)
+        try:
+            splitter = detect_splitting_strategy(path)
+            assert isinstance(splitter, RegexTextSplitter)
+        finally:
+            os.unlink(path)
+
+    def test_two_horizontal_rules_not_enough(self):
+        """File with only 2 horizontal rules -> not delimiter (threshold is 3)."""
+        content = "Section A\n---\nSection B\n---\nSection C"
+        path = _write_temp_file(content)
+        try:
+            splitter = detect_splitting_strategy(path)
+            assert not isinstance(splitter, RegexTextSplitter)
+        finally:
+            os.unlink(path)
+
+    def test_file_not_found_falls_back(self):
+        """Non-existent file -> ParagraphSplitter fallback."""
+        splitter = detect_splitting_strategy("/nonexistent/path/file.md")
+        assert isinstance(splitter, ParagraphSplitter)
+
+
+# -- Adaptive Splitting: _create_splitter_from_config tests --
+
+
+class TestCreateSplitterFromConfig:
+    """Test creating splitters from state configuration."""
+
+    def test_delimiter_strategy(self):
+        splitter = _create_splitter_from_config({"strategy": "delimiter", "pattern": "==="})
+        assert isinstance(splitter, RegexTextSplitter)
+        assert splitter.re == "==="
+
+    def test_delimiter_default_pattern(self):
+        splitter = _create_splitter_from_config({"strategy": "delimiter"})
+        assert isinstance(splitter, RegexTextSplitter)
+        assert splitter.re == "---"
+
+    def test_sections_strategy(self):
+        splitter = _create_splitter_from_config({"strategy": "sections"})
+        assert isinstance(splitter, MarkdownSectionSplitter)
+
+    def test_paragraphs_strategy(self):
+        splitter = _create_splitter_from_config({"strategy": "paragraphs"})
+        assert isinstance(splitter, ParagraphSplitter)
+
+    def test_unknown_strategy_falls_back(self):
+        splitter = _create_splitter_from_config({"strategy": "something_else"})
+        assert isinstance(splitter, ParagraphSplitter)
+
+    def test_empty_config(self):
+        """Empty dict defaults to delimiter with '---' pattern."""
+        splitter = _create_splitter_from_config({})
+        assert isinstance(splitter, RegexTextSplitter)
+        assert splitter.re == "---"
+
+
+# -- Adaptive Splitting: splitter output tests --
+
+
+class TestMarkdownSectionSplitter:
+    """Test MarkdownSectionSplitter output."""
+
+    def test_splits_on_headings(self):
+        text = "# Title\nIntro text\n\n## Section 1\nContent 1\n\n## Section 2\nContent 2"
+        splitter = MarkdownSectionSplitter()
+        chunks = asyncio.run(splitter.run(text))
+        # Should produce 3 chunks: Title section, Section 1, Section 2
+        assert len(chunks.chunks) == 3
+        assert "# Title" in chunks.chunks[0].text
+        assert "## Section 1" in chunks.chunks[1].text
+        assert "## Section 2" in chunks.chunks[2].text
+
+    def test_handles_preamble(self):
+        """Text before first heading is kept as preamble chunk."""
+        text = "Some preamble text\n\n# First Heading\nContent"
+        splitter = MarkdownSectionSplitter()
+        chunks = asyncio.run(splitter.run(text))
+        assert len(chunks.chunks) == 2
+        assert "preamble" in chunks.chunks[0].text
+        assert "# First Heading" in chunks.chunks[1].text
+
+    def test_nested_headings(self):
+        """Different heading levels all trigger splits."""
+        text = "# H1\nContent 1\n## H2\nContent 2\n### H3\nContent 3"
+        splitter = MarkdownSectionSplitter()
+        chunks = asyncio.run(splitter.run(text))
+        assert len(chunks.chunks) == 3
+
+    def test_no_headings_returns_single_chunk(self):
+        """Text with no headings returns one chunk."""
+        text = "Just some plain text without any headings."
+        splitter = MarkdownSectionSplitter()
+        chunks = asyncio.run(splitter.run(text))
+        assert len(chunks.chunks) == 1
+
+    def test_chunks_have_sequential_indices(self):
+        text = "# A\ntext\n## B\ntext\n## C\ntext"
+        splitter = MarkdownSectionSplitter()
+        chunks = asyncio.run(splitter.run(text))
+        indices = [c.index for c in chunks.chunks]
+        assert indices == list(range(len(chunks.chunks)))
+
+
+class TestParagraphSplitter:
+    """Test ParagraphSplitter output."""
+
+    def test_splits_on_double_newlines(self):
+        text = "Paragraph one.\n\nParagraph two.\n\nParagraph three."
+        splitter = ParagraphSplitter()
+        chunks = asyncio.run(splitter.run(text))
+        assert len(chunks.chunks) == 3
+        assert chunks.chunks[0].text == "Paragraph one."
+        assert chunks.chunks[1].text == "Paragraph two."
+        assert chunks.chunks[2].text == "Paragraph three."
+
+    def test_skips_empty_paragraphs(self):
+        """Multiple blank lines don't produce empty chunks."""
+        text = "First.\n\n\n\n\nSecond.\n\n\n\nThird."
+        splitter = ParagraphSplitter()
+        chunks = asyncio.run(splitter.run(text))
+        assert len(chunks.chunks) == 3
+
+    def test_single_paragraph(self):
+        text = "Just one paragraph with no breaks."
+        splitter = ParagraphSplitter()
+        chunks = asyncio.run(splitter.run(text))
+        assert len(chunks.chunks) == 1
+
+    def test_strips_whitespace(self):
+        text = "  First paragraph.  \n\n  Second paragraph.  "
+        splitter = ParagraphSplitter()
+        chunks = asyncio.run(splitter.run(text))
+        assert chunks.chunks[0].text == "First paragraph."
+        assert chunks.chunks[1].text == "Second paragraph."
+
+    def test_chunks_have_sequential_indices(self):
+        text = "A\n\nB\n\nC\n\nD"
+        splitter = ParagraphSplitter()
+        chunks = asyncio.run(splitter.run(text))
+        indices = [c.index for c in chunks.chunks]
+        assert indices == [0, 1, 2, 3]
