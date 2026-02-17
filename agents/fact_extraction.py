@@ -25,6 +25,7 @@ from tools.extraction_tools import (
     format_user_goal,
 )
 from tools.file_tools import TOOL_SAMPLE_FILE, handle_sample_file
+from tools.competency_tools import format_competency_questions
 
 
 SYSTEM_PROMPT_TEMPLATE = """\
@@ -39,6 +40,12 @@ instance like (Gothenburg Table)-[has_issue]->(Wobbly leg).
 ## User Goal
 
 {user_goal}
+
+## Competency Questions
+
+Proposed fact types should enable traversal paths that answer these questions:
+
+{competency_questions}
 
 ## Approved Entity Types
 
@@ -173,10 +180,12 @@ class FactExtractionAgent:
 
         entity_types = build_entity_types_context(state)
         file_context = build_markdown_context(state, lines_per_section=2)
+        competency_questions = format_competency_questions(state)
 
         # Inject into prompt template
         system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
             user_goal=user_goal_str,
+            competency_questions=competency_questions,
             approved_entity_types=entity_types,
             file_context=file_context,
         )

@@ -25,6 +25,7 @@ from tools.schema_tools import (
     handle_approve_proposed_construction_plan,
     build_file_context,
 )
+from tools.competency_tools import format_competency_questions
 
 
 SYSTEM_PROMPT_TEMPLATE = """\
@@ -35,6 +36,9 @@ relationships, based on the user's goal.
 USER GOAL:
 - Kind: {user_goal_kind}
 - Description: {user_goal_description}
+
+COMPETENCY QUESTIONS (the graph schema must support answering these):
+{competency_questions}
 
 APPROVED FILE DATA:
 {file_context}
@@ -178,12 +182,14 @@ class SchemaProposalAgent:
         user_goal_kind = user_goal.get("kind_of_graph", "unknown")
         user_goal_description = user_goal.get("graph_description", "No description available.")
 
-        # Pre-compute file context
+        # Pre-compute file context and competency questions
         file_context = build_file_context(state) or "No approved files found."
+        competency_questions = format_competency_questions(state)
 
         system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
             user_goal_kind=user_goal_kind,
             user_goal_description=user_goal_description,
+            competency_questions=competency_questions,
             file_context=file_context,
         )
 

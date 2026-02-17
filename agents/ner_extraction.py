@@ -24,6 +24,7 @@ from tools.extraction_tools import (
     format_user_goal,
 )
 from tools.file_tools import TOOL_SAMPLE_FILE, handle_sample_file
+from tools.competency_tools import format_competency_questions
 
 
 SYSTEM_PROMPT_TEMPLATE = """\
@@ -38,6 +39,12 @@ For example: "Product" is an entity type, "Gothenburg Table" is an instance.
 ## User Goal
 
 {user_goal}
+
+## Competency Questions
+
+Proposed entity types should support answering these questions:
+
+{competency_questions}
 
 ## Well-Known Entity Types
 
@@ -224,10 +231,12 @@ class NerExtractionAgent:
 
         well_known_types = build_well_known_types(state)
         file_context = build_markdown_context(state, lines_per_section=2)
+        competency_questions = format_competency_questions(state)
 
         # Inject into prompt template
         system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
             user_goal=user_goal_str,
+            competency_questions=competency_questions,
             well_known_types=well_known_types,
             file_context=file_context,
         )

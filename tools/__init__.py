@@ -57,6 +57,24 @@ from tools.extraction_tools import (
     build_entity_types_context,
 )
 
+from tools.competency_tools import (
+    TOOL_SET_PROPOSED_CQS,
+    TOOL_APPROVE_PROPOSED_CQS,
+    TOOL_ADD_CQ,
+    TOOL_MODIFY_CQ,
+    TOOL_DELETE_CQ,
+    TOOL_GET_CQS,
+    TOOL_APPROVE_CQ_CHANGES,
+    handle_set_proposed_cqs,
+    handle_approve_proposed_cqs,
+    handle_add_cq,
+    handle_modify_cq,
+    handle_delete_cq,
+    handle_get_cqs,
+    handle_approve_cq_changes,
+    format_competency_questions,
+)
+
 __all__ = [
     # Intent tools (Stage 1)
     "TOOL_SET_PROPOSED_GOAL",
@@ -107,4 +125,20 @@ __all__ = [
     "build_well_known_types",
     "build_structured_preview",
     "build_entity_types_context",
+    # Competency question tools
+    "TOOL_SET_PROPOSED_CQS",
+    "TOOL_APPROVE_PROPOSED_CQS",
+    "TOOL_ADD_CQ",
+    "TOOL_MODIFY_CQ",
+    "TOOL_DELETE_CQ",
+    "TOOL_GET_CQS",
+    "TOOL_APPROVE_CQ_CHANGES",
+    "handle_set_proposed_cqs",
+    "handle_approve_proposed_cqs",
+    "handle_add_cq",
+    "handle_modify_cq",
+    "handle_delete_cq",
+    "handle_get_cqs",
+    "handle_approve_cq_changes",
+    "format_competency_questions",
 ]

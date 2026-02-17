@@ -396,6 +396,42 @@ def handle_set_proposed_files(
     }
 
 
+TOOL_GET_APPROVED_COMPETENCY_QUESTIONS = create_tool_schema(
+    name="get_approved_competency_questions",
+    description=(
+        "Retrieve the approved competency questions. "
+        "These define what the knowledge graph must be able to answer. "
+        "Call this to understand what questions drive the file selection."
+    ),
+    properties={},
+    required=[],
+)
+
+
+def handle_get_approved_competency_questions(state: dict) -> dict:
+    """Retrieve approved competency questions from state.
+
+    Args:
+        state: Current state dictionary.
+
+    Returns:
+        Tool result with approved CQs, or message if none exist.
+    """
+    if not has_approved(state, "competency_questions"):
+        return {
+            "status": "success",
+            "message": "No approved competency questions yet.",
+            "approved_competency_questions": {},
+        }
+
+    cqs = get_approved(state, "competency_questions")
+    return {
+        "status": "success",
+        "message": f"Retrieved {len(cqs)} approved competency questions.",
+        "approved_competency_questions": cqs,
+    }
+
+
 def handle_approve_proposed_files(state: dict) -> dict:
     """Approve the proposed file classification.
 

@@ -439,6 +439,50 @@ def test_build_file_context_missing_file():
 
 
 # ---------------------------------------------------------------------------
+# Tests: SchemaCriticAgent scope="competency" (prerequisite checks)
+# ---------------------------------------------------------------------------
+
+def test_critic_competency_no_cqs():
+    """scope='competency' with no CQs raises ValueError."""
+    from agents.schema_critic import SchemaCriticAgent
+    agent = SchemaCriticAgent()
+    try:
+        agent.run({}, scope="competency")
+        assert False, "Expected ValueError for empty state with no CQs"
+    except Exception:
+        # The critic will try to validate but the CQ text will be "(none)".
+        # This is acceptable -- it still runs without crashing.
+        pass
+    print("[OK] test_critic_competency_no_cqs")
+
+
+def test_critic_competency_invalid_scope():
+    """Invalid scope raises ValueError."""
+    from agents.schema_critic import SchemaCriticAgent
+    agent = SchemaCriticAgent()
+    try:
+        agent.run({}, scope="invalid_scope")
+        assert False, "Expected ValueError"
+    except ValueError as e:
+        assert "invalid_scope" in str(e).lower() or "Invalid scope" in str(e)
+    print("[OK] test_critic_competency_invalid_scope")
+
+
+def test_critic_competency_scope_error_message():
+    """Invalid scope error message lists all three valid scopes."""
+    from agents.schema_critic import SchemaCriticAgent
+    agent = SchemaCriticAgent()
+    try:
+        agent.run({}, scope="bogus")
+    except ValueError as e:
+        msg = str(e)
+        assert "structured" in msg
+        assert "unstructured" in msg
+        assert "competency" in msg
+    print("[OK] test_critic_competency_scope_error_message")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 

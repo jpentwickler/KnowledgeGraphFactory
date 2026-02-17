@@ -1,10 +1,11 @@
 """Schema Critic Agent — validates proposed artifacts at each pipeline stage.
 
 Stateless validator that pre-computes context and injects it into the system
-prompt. Supports two scopes:
+prompt. Supports three scopes:
 
 - "structured": Validates the construction plan against CSV files.
 - "unstructured": Validates entity types and fact types against markdown files.
+- "competency": Validates competency questions against available artifacts.
 
 Uses a single submit_review tool for structured verdicts.
 No conversation history needed — each validation is independent.
@@ -23,6 +24,7 @@ from tools.extraction_tools import (
     build_markdown_context,
     build_well_known_types,
 )
+from tools.competency_tools import format_competency_questions
 
 
 STRUCTURED_PROMPT_TEMPLATE = """\
@@ -192,6 +194,142 @@ a list of specific, actionable problems to fix.\
 """
 
 
+COMPETENCY_PROMPT_TEMPLATE = """\
+You are an expert at knowledge graph modeling with property graphs. \
+Your job is to validate the proposed competency questions against the \
+user goal and any available schema artifacts.
+
+USER GOAL:
+- Kind: {user_goal_kind}
+- Description: {user_goal_description}
+
+COMPETENCY QUESTIONS TO VALIDATE:
+{competency_questions}
+
+{available_artifacts}
+
+VALIDATION RULES:
+
+1. Goal relevance: Every CQ should clearly connect to the stated user goal. \
+Flag questions that have no obvious relationship to the goal.
+
+2. Specificity: CQs should be specific enough to answer via graph traversal. \
+Flag vague questions like "What is the data about?" or "How are things related?"
+
+3. Answerability: Each CQ should be answerable by traversing nodes and \
+relationships. Flag questions that require information not in a graph \
+(e.g., "What is the future trend?").
+
+4. No redundancy: Check for CQs that ask the same thing in different words. \
+Flag duplicates and recommend which to keep.
+
+5. Priority correctness: High-priority CQs should be core to the stated goal. \
+Flag any high-priority CQ that seems peripheral, or low-priority CQs that \
+seem essential.
+
+6. Category consistency: CQs in the same category should be thematically \
+related. Flag any CQ that seems miscategorized.
+
+7. Coverage: Are there obvious aspects of the user goal that no CQ addresses? \
+Flag gaps in coverage.
+
+{schema_validation_rules}
+
+INSTRUCTIONS:
+
+Analyze the competency questions against the user goal and any available \
+artifacts above. You have all the context you need -- do NOT ask for more \
+information.
+
+After completing your analysis, you MUST call the 'submit_review' tool:
+- If the CQs are well-formed, call submit_review with verdict "valid" and \
+an empty problems list.
+- If the CQs have problems, call submit_review with verdict "retry" and a \
+list of specific, actionable problems to fix.\
+"""
+
+
+def _build_available_artifacts(state: dict) -> str:
+    """Dynamically build the artifacts section based on what's approved.
+
+    Args:
+        state: Current state dictionary.
+
+    Returns:
+        Formatted string describing available artifacts.
+    """
+    sections = []
+
+    plan = get_approved(state, "construction_plan")
+    if plan:
+        plan_summary = json.dumps(plan, indent=2)
+        sections.append(f"APPROVED CONSTRUCTION PLAN:\n{plan_summary}")
+
+    entities = get_approved(state, "entity_types")
+    if entities:
+        lines = []
+        for name, details in entities.items():
+            source = details.get("source", "unknown")
+            description = details.get("description", "No description")
+            lines.append(f"- {name} ({source}): {description}")
+        sections.append("APPROVED ENTITY TYPES:\n" + "\n".join(lines))
+
+    facts = get_approved(state, "fact_types")
+    if facts:
+        lines = []
+        for predicate, triple in facts.items():
+            subj = triple.get("subject_label", "?")
+            obj = triple.get("object_label", "?")
+            lines.append(f"- ({subj})-[{predicate}]->({obj})")
+        sections.append("APPROVED FACT TYPES:\n" + "\n".join(lines))
+
+    if not sections:
+        return "AVAILABLE ARTIFACTS:\n(none -- only the user goal is available)"
+
+    return "AVAILABLE ARTIFACTS:\n\n" + "\n\n".join(sections)
+
+
+def _build_schema_validation_rules(state: dict) -> str:
+    """Build schema-specific validation rules based on available artifacts.
+
+    Args:
+        state: Current state dictionary.
+
+    Returns:
+        Extra validation rules for when schema artifacts are available.
+    """
+    rules = []
+
+    if get_approved(state, "construction_plan"):
+        rules.append(
+            "8. Schema coverage: For each CQ, check whether the construction "
+            "plan contains the node labels and relationship types needed to "
+            "answer it. Flag CQs that reference concepts not in the schema."
+        )
+
+    if get_approved(state, "entity_types"):
+        rules.append(
+            "9. Entity type coverage: For each CQ, check whether the approved "
+            "entity types include the categories needed. Flag CQs that assume "
+            "entity types not in the approved set."
+        )
+
+    if get_approved(state, "fact_types"):
+        rules.append(
+            "10. Relationship coverage: For each CQ, trace the traversal path "
+            "through approved fact types. Flag CQs where the needed "
+            "relationship path does not exist in the approved fact types."
+        )
+
+    if not rules:
+        return (
+            "Note: No schema artifacts are approved yet. Validate only "
+            "internal consistency, specificity, and goal relevance."
+        )
+
+    return "SCHEMA-SPECIFIC VALIDATION:\n\n" + "\n\n".join(rules)
+
+
 def _format_entity_types(state: dict) -> str:
     """Get entity types for validation -- proposed takes priority over approved."""
     entities = state.get("proposed_entity_types") or state.get("approved_entity_types", {})
@@ -265,9 +403,10 @@ def _format_entity_evidence(state: dict) -> str:
 class SchemaCriticAgent:
     """Stateless critic agent for on-demand validation.
 
-    Supports two scopes:
+    Supports three scopes:
     - "structured": Validates the construction plan against CSV files.
     - "unstructured": Validates entity types and fact types against markdown files.
+    - "competency": Validates competency questions against available artifacts.
 
     Pre-computes context and injects it into the system prompt.
     No conversation history needed -- each validation is independent.
@@ -283,9 +422,12 @@ class SchemaCriticAgent:
 
         Args:
             state: Current state dictionary.
-            scope: What to validate. "structured" validates the construction
-                plan against CSV files. "unstructured" validates entity types
-                and fact types against markdown files.
+            scope: What to validate.
+                "structured" validates the construction plan against CSV files.
+                "unstructured" validates entity types and fact types against
+                    markdown files.
+                "competency" validates competency questions against available
+                    artifacts.
 
         Returns:
             (response text, updated state with _critic_verdict/_critic_problems)
@@ -331,8 +473,39 @@ class SchemaCriticAgent:
             else:
                 message = "Validate the proposed entity types."
 
+        elif scope == "competency":
+            # Get CQs: proposed takes priority over approved
+            cqs = state.get("proposed_competency_questions") or state.get(
+                "approved_competency_questions", {}
+            )
+            if not cqs:
+                cq_text = "(none)"
+            else:
+                lines = []
+                for cq_id, details in cqs.items():
+                    q = details.get("question", "")
+                    cat = details.get("category", "general")
+                    pri = details.get("priority", "medium")
+                    lines.append(f"- [{cq_id}] ({pri}, {cat}) {q}")
+                cq_text = "\n".join(lines)
+
+            available_artifacts = _build_available_artifacts(state)
+            schema_rules = _build_schema_validation_rules(state)
+
+            system_prompt = COMPETENCY_PROMPT_TEMPLATE.format(
+                user_goal_kind=user_goal_kind,
+                user_goal_description=user_goal_description,
+                competency_questions=cq_text,
+                available_artifacts=available_artifacts,
+                schema_validation_rules=schema_rules,
+            )
+            message = "Validate the proposed competency questions."
+
         else:
-            raise ValueError(f"Invalid scope: {scope}. Use 'structured' or 'unstructured'.")
+            raise ValueError(
+                f"Invalid scope: {scope}. "
+                "Use 'structured', 'unstructured', or 'competency'."
+            )
 
         response, state, _ = run_agent_sync(
             message=message,

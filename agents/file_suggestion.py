@@ -16,6 +16,10 @@ from tools import (
     handle_set_proposed_files,
     handle_approve_proposed_files,
 )
+from tools.file_tools import (
+    TOOL_GET_APPROVED_COMPETENCY_QUESTIONS,
+    handle_get_approved_competency_questions,
+)
 
 
 SYSTEM_PROMPT = """\
@@ -29,6 +33,7 @@ Examine available data files and classify them for the knowledge graph pipeline:
 WORKFLOW:
 1. FIRST: Call get_approved_user_goal to understand what the user wants to build.
    If there is no approved goal, tell the user Stage 1 must be completed first.
+   Also call get_approved_competency_questions to see what questions the graph must answer.
 2. Call list_available_files to see what data is available.
 3. Call get_file_info for EACH file to understand its contents (columns, headings, etc.).
 4. Only call sample_file if get_file_info is not enough to classify a file.
@@ -66,6 +71,7 @@ Be professional and ensure the user approves before finalizing."""
 
 TOOLS = [
     TOOL_GET_APPROVED_USER_GOAL,
+    TOOL_GET_APPROVED_COMPETENCY_QUESTIONS,
     TOOL_LIST_AVAILABLE_FILES,
     TOOL_GET_FILE_INFO,
     TOOL_SAMPLE_FILE,
@@ -75,6 +81,7 @@ TOOLS = [
 
 TOOL_HANDLERS = {
     "get_approved_user_goal": handle_get_approved_user_goal,
+    "get_approved_competency_questions": handle_get_approved_competency_questions,
     "list_available_files": handle_list_available_files,
     "get_file_info": handle_get_file_info,
     "sample_file": handle_sample_file,
