@@ -46,9 +46,11 @@ from agents import (
     SchemaCriticAgent,
     NerExtractionAgent,
     FactExtractionAgent,
+    CompetencyQuestionsAgent,
 )
 from core import load_state, save_state
 from core.tracing import mcp_traceable
+from utils import get_neo4j_driver, test_connection, close_driver
 
 
 # Create MCP server
@@ -253,12 +255,18 @@ def kg_user_intent(message: str) -> dict:
     status = {
         "has_proposed_goal": "proposed_user_goal" in state,
         "has_approved_goal": "approved_user_goal" in state,
+        "has_proposed_cqs": "proposed_competency_questions" in state,
+        "has_approved_cqs": "approved_competency_questions" in state,
     }
 
     if "proposed_user_goal" in state:
         status["proposed_goal"] = state["proposed_user_goal"]
     if "approved_user_goal" in state:
         status["approved_goal"] = state["approved_user_goal"]
+    if "proposed_competency_questions" in state:
+        status["proposed_cqs"] = state["proposed_competency_questions"]
+    if "approved_competency_questions" in state:
+        status["approved_cqs"] = state["approved_competency_questions"]
 
     return {
         "agent_response": response,
@@ -365,6 +373,55 @@ def kg_schema_proposal(message: str) -> dict:
 
 
 @mcp.tool
+@mcp_traceable(name="mcp.kg_competency_questions")
+def kg_competency_questions(message: str) -> dict:
+    """Send a message to the Competency Questions Management Agent.
+
+    Manages competency questions at any pipeline stage. Can add, modify,
+    delete, and approve competency questions that define what the knowledge
+    graph must be able to answer.
+
+    Pass the user's message exactly as they wrote it. Multi-turn conversation.
+    Call once per user message. Stage 1 (User Intent) must be completed first.
+
+    Args:
+        message: The user's message, passed through exactly as written.
+
+    Returns:
+        Dictionary with agent response and current status.
+    """
+    state = _load_clean_state()
+    conversation = _pop_conversation(state, "_competency_questions_conversation")
+
+    agent = CompetencyQuestionsAgent()
+    response, state, conversation = agent.run(message, state, conversation)
+
+    _store_conversation(
+        state, "_competency_questions_conversation", conversation
+    )
+    _save_state(state)
+
+    # Build status info
+    status = {
+        "has_proposed_cqs": "proposed_competency_questions" in state,
+        "has_approved_cqs": "approved_competency_questions" in state,
+    }
+
+    if "proposed_competency_questions" in state:
+        status["proposed_cqs"] = state["proposed_competency_questions"]
+        status["proposed_count"] = len(state["proposed_competency_questions"])
+
+    if "approved_competency_questions" in state:
+        status["approved_cqs"] = state["approved_competency_questions"]
+        status["approved_count"] = len(state["approved_competency_questions"])
+
+    return {
+        "agent_response": response,
+        "status": status,
+    }
+
+
+@mcp.tool
 @mcp_traceable(name="mcp.kg_critic")
 def kg_critic(scope: str = "structured") -> dict:
     """Run the critic agent to review proposed artifacts for problems.
@@ -372,18 +429,20 @@ def kg_critic(scope: str = "structured") -> dict:
     The critic is an independent reviewer that checks for errors, missing
     elements, and inconsistencies. It does NOT approve or finalize anything.
 
-    Two scopes are available:
+    Three scopes are available:
     - "structured" (default): Reviews the construction plan against CSV files.
       Use after kg_schema_proposal to check column references, identifier
       uniqueness, and relationship correctness.
     - "unstructured": Reviews entity types and fact types against markdown files.
       Use after kg_ner_extraction or kg_fact_extraction to check text grounding,
       overlapping types, and predicate quality.
+    - "competency": Reviews competency questions against available artifacts.
+      Use after kg_user_intent or kg_competency_questions to validate CQs.
 
     No message needed -- the critic analyzes whatever is currently proposed.
 
     Args:
-        scope: What to review. "structured" or "unstructured".
+        scope: What to review. "structured", "unstructured", or "competency".
 
     Returns:
         Dictionary with critic verdict, problems list, and response text.
@@ -407,9 +466,23 @@ def kg_critic(scope: str = "structured") -> dict:
                 "Use kg_ner_extraction first to propose entity types.",
                 "status": {"error": "no_entity_types"},
             }
+    elif scope == "competency":
+        has_cqs = (
+            "proposed_competency_questions" in state
+            or "approved_competency_questions" in state
+        )
+        if not has_cqs:
+            return {
+                "agent_response": "No competency questions to review. "
+                "Use kg_user_intent or kg_competency_questions first.",
+                "status": {"error": "no_competency_questions"},
+            }
     else:
         return {
-            "agent_response": f"Invalid scope: '{scope}'. Use 'structured' or 'unstructured'.",
+            "agent_response": (
+                f"Invalid scope: '{scope}'. "
+                "Use 'structured', 'unstructured', or 'competency'."
+            ),
             "status": {"error": "invalid_scope"},
         }
 
@@ -580,6 +653,90 @@ def _format_rel_results(rels: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _create_text_indexes(driver) -> dict:
+    """Create chunk-embeddings (vector) and chunk-fulltext indexes.
+
+    Idempotent: Uses IF NOT EXISTS + SHOW INDEXES check.
+    Non-blocking: Failures logged, don't stop graph building.
+
+    Args:
+        driver: Neo4j driver instance
+
+    Returns:
+        {
+            "chunk-embeddings": {"status": "created"|"exists"|"failed", "message": str},
+            "chunk-fulltext": {"status": "created"|"exists"|"failed", "message": str}
+        }
+    """
+    results = {}
+
+    # Define indexes to create
+    indexes = {
+        "chunk-embeddings": {
+            "type": "vector",
+            "cypher": """
+                CREATE VECTOR INDEX `chunk-embeddings` IF NOT EXISTS
+                FOR (c:Chunk) ON c.embedding
+                OPTIONS {indexConfig: {
+                    `vector.dimensions`: 3072,
+                    `vector.similarity_function`: 'cosine'
+                }}
+            """
+        },
+        "chunk-fulltext": {
+            "type": "fulltext",
+            "cypher": """
+                CREATE FULLTEXT INDEX `chunk-fulltext` IF NOT EXISTS
+                FOR (c:Chunk) ON EACH [c.text]
+            """
+        }
+    }
+
+    with driver.session() as session:
+        # Check existing indexes first
+        try:
+            existing_indexes = session.run("SHOW INDEXES YIELD name RETURN name")
+            existing_names = {record["name"] for record in existing_indexes}
+        except Exception as e:
+            # If SHOW INDEXES fails, proceed with IF NOT EXISTS logic
+            existing_names = set()
+            print(f"Warning: Could not check existing indexes: {e}")
+
+        # Create each index
+        for index_name, config in indexes.items():
+            try:
+                # Check if already exists
+                if index_name in existing_names:
+                    results[index_name] = {
+                        "status": "exists",
+                        "message": f"{config['type'].capitalize()} index already exists"
+                    }
+                    continue
+
+                # Create index
+                session.run(config["cypher"])
+                results[index_name] = {
+                    "status": "created",
+                    "message": f"{config['type'].capitalize()} index created successfully"
+                }
+
+            except Exception as e:
+                error_msg = str(e)
+                results[index_name] = {
+                    "status": "failed",
+                    "message": f"Failed to create {config['type']} index: {error_msg}"
+                }
+
+                # Log warning but don't raise (non-blocking)
+                if "insufficient privilege" in error_msg.lower():
+                    print(f"Warning: Insufficient privileges to create index '{index_name}'. "
+                          "Vector/hybrid search may not work. Contact your Neo4j admin.")
+                else:
+                    print(f"Warning: Failed to create index '{index_name}': {error_msg}")
+
+    return results
+
+
 @mcp_traceable(name="mcp._build_structured")
 def _build_structured(state, driver, conn_info):
     """Build domain graph from CSVs (existing US008 behavior).
@@ -707,6 +864,13 @@ async def _build_unstructured(state, driver, message):
 
     results = await build_text_graph(state, driver, message)
     _save_state(state)  # Persist text_graph_progress
+
+    # Create indexes after first successful file processing (Phase 3: US013)
+    if results["files_processed"] and "_index_creation_attempted" not in state:
+        index_status = _create_text_indexes(driver)
+        state["_index_creation_status"] = index_status
+        state["_index_creation_attempted"] = True
+        _save_state(state)  # Persist ephemeral status for debugging
 
     processed = results["files_processed"]
     errors = results["errors"]
@@ -878,15 +1042,6 @@ async def kg_build_graph(message: str = "build", scope: str = "structured") -> d
             "status": {"success": False, "error": "missing_neo4j_credentials"},
         }
 
-    # Import modules
-    try:
-        from utils import get_neo4j_driver, test_connection, close_driver
-    except ImportError as exc:
-        return {
-            "agent_response": f"Failed to import graph builder modules: {exc}",
-            "status": {"success": False, "error": "import_error"},
-        }
-
     # Connect to Neo4j
     try:
         driver = get_neo4j_driver()
@@ -1002,6 +1157,114 @@ async def kg_build_graph(message: str = "build", scope: str = "structured") -> d
                 "error": "build_failed",
                 "details": str(exc),
             },
+        }
+
+
+@mcp.tool
+@mcp_traceable(name="mcp.kg_query")
+async def kg_query(question: str, context: str = "") -> dict:
+    """Query the knowledge graph with adaptive retrieval.
+
+    Automatically selects optimal strategy based on question type and available graph layers:
+    - schema: Graph structure exploration
+    - cypher: Structured traversal queries
+    - vector: Semantic similarity search
+    - hybrid: Vector + keyword search
+    - cross_layer: Hybrid search + domain entity traversal
+
+    Args:
+        question: Natural language question or Cypher query
+        context: Optional context to guide strategy selection (default: "")
+
+    Returns:
+        {
+            "answer": str,              # Formatted query results
+            "evidence": list,           # Raw evidence items
+            "confidence": float,        # 0.0-1.0 confidence score
+            "details": dict,            # Strategy, parameters, metadata
+            "status": {
+                "success": bool,
+                "selected_strategy": str,
+                "reasoning": str,
+                "error": str (if failed)
+            }
+        }
+
+    Examples:
+        # Schema exploration
+        kg_query("What labels exist in the graph?")
+
+        # Cypher query
+        kg_query("MATCH (s:Supplier) RETURN s.name LIMIT 5")
+
+        # Semantic search
+        kg_query("Tell me about supply chain delays")
+
+        # Hybrid search
+        kg_query("Documents about quality issues")
+
+        # Cross-layer traversal
+        kg_query("What suppliers are mentioned in reviews?")
+    """
+    from pipelines.query_builder import (
+        _select_retrieval_strategy,
+        _execute_schema_query,
+        _execute_cypher,
+        _execute_vector_search,
+        _execute_hybrid_search,
+        _execute_cross_layer_traversal
+    )
+
+    try:
+        state = _load_clean_state()
+        driver = get_neo4j_driver()
+
+        try:
+            # Select strategy via Claude
+            strategy_data = await _select_retrieval_strategy(question, context, state)
+            strategy = strategy_data["strategy"]
+            params = strategy_data.get("parameters", {})
+            reasoning = strategy_data.get("reasoning", "")
+
+            # Execute selected strategy
+            if strategy == "schema":
+                result = _execute_schema_query(driver, state)
+            elif strategy == "cypher":
+                result = _execute_cypher(driver, params["cypher_query"])
+            elif strategy == "vector":
+                result = _execute_vector_search(driver, question, params.get("top_k", 5))
+            elif strategy == "hybrid":
+                result = _execute_hybrid_search(driver, question, params.get("top_k", 5))
+            elif strategy == "cross_layer":
+                result = _execute_cross_layer_traversal(driver, question, params.get("top_k", 5), state)
+            else:
+                # Fallback to schema if unknown strategy
+                result = _execute_schema_query(driver, state)
+                reasoning = f"Unknown strategy '{strategy}', falling back to schema"
+
+            # Add status metadata
+            result["status"] = {
+                "success": True,
+                "selected_strategy": strategy,
+                "reasoning": reasoning
+            }
+
+            return result
+
+        finally:
+            close_driver(driver)
+
+    except Exception as e:
+        error_msg = str(e)
+        return {
+            "answer": f"Query failed: {error_msg}",
+            "evidence": [],
+            "confidence": 0.0,
+            "details": {},
+            "status": {
+                "success": False,
+                "error": error_msg
+            }
         }
 
 

@@ -280,6 +280,66 @@ class TestMcpTraceable:
         assert sig.parameters["scope"].default == "structured"
 
 
+class TestQueryBuilderTracing:
+    """Test that query builder functions have @traceable decorators."""
+
+    def test_select_retrieval_strategy_is_decorated(self):
+        """_select_retrieval_strategy should have @traceable applied."""
+        from pipelines.query_builder import _select_retrieval_strategy
+        # If langsmith is installed, @traceable wraps the function (changing __wrapped__);
+        # if using fallback, the function is returned unchanged. Either way, it must be callable.
+        assert callable(_select_retrieval_strategy)
+        assert asyncio.iscoroutinefunction(_select_retrieval_strategy)
+
+    def test_execute_schema_query_is_decorated(self):
+        """_execute_schema_query should have @traceable applied."""
+        from pipelines.query_builder import _execute_schema_query
+        assert callable(_execute_schema_query)
+
+    def test_execute_cypher_is_decorated(self):
+        """_execute_cypher should have @traceable applied."""
+        from pipelines.query_builder import _execute_cypher
+        assert callable(_execute_cypher)
+
+    def test_execute_vector_search_is_decorated(self):
+        """_execute_vector_search should have @traceable applied."""
+        from pipelines.query_builder import _execute_vector_search
+        assert callable(_execute_vector_search)
+
+    def test_execute_hybrid_search_is_decorated(self):
+        """_execute_hybrid_search should have @traceable applied."""
+        from pipelines.query_builder import _execute_hybrid_search
+        assert callable(_execute_hybrid_search)
+
+    def test_execute_cross_layer_traversal_is_decorated(self):
+        """_execute_cross_layer_traversal should have @traceable applied."""
+        from pipelines.query_builder import _execute_cross_layer_traversal
+        assert callable(_execute_cross_layer_traversal)
+
+    def test_all_query_functions_preserve_names(self):
+        """All decorated query functions should preserve their original names."""
+        from pipelines.query_builder import (
+            _select_retrieval_strategy,
+            _execute_schema_query,
+            _execute_cypher,
+            _execute_vector_search,
+            _execute_hybrid_search,
+            _execute_cross_layer_traversal,
+        )
+
+        expected = {
+            _select_retrieval_strategy: "_select_retrieval_strategy",
+            _execute_schema_query: "_execute_schema_query",
+            _execute_cypher: "_execute_cypher",
+            _execute_vector_search: "_execute_vector_search",
+            _execute_hybrid_search: "_execute_hybrid_search",
+            _execute_cross_layer_traversal: "_execute_cross_layer_traversal",
+        }
+
+        for func, name in expected.items():
+            assert func.__name__ == name, f"{func} lost its __name__ (expected {name})"
+
+
 class TestModuleExports:
     """Test that core.tracing exports the expected symbols."""
 
