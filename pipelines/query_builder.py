@@ -18,7 +18,10 @@ from neo4j import Driver
 
 from tools.query_tools import (
     _get_domain_labels,
+    _get_domain_node_properties,
+    _get_domain_relationships,
     _get_text_entities,
+    _get_text_relationships,
     format_cypher_results,
     format_retriever_results,
     calculate_confidence,
@@ -106,16 +109,42 @@ async def _select_retrieval_strategy(
     """
     # Extract graph context from state
     domain_labels = _get_domain_labels(state)
+    domain_node_props = _get_domain_node_properties(state)
     text_entities = _get_text_entities(state)
     has_text_graph = "text_graph_progress" in state
     has_domain_graph = has_approved(state, "construction_plan")
 
+    # Extract relationship info from state
+    domain_rels = _get_domain_relationships(state)
+    text_rels = _get_text_relationships(state)
+
     # Build graph context summary
     graph_context = []
     if has_domain_graph:
-        graph_context.append(f"Domain layer with {len(domain_labels)} node types: {', '.join(domain_labels[:5])}")
+        if domain_node_props:
+            lines = [f"Domain layer with {len(domain_node_props)} node types:"]
+            for label, props in domain_node_props.items():
+                if props:
+                    lines.append(f"  {label} [{', '.join(props)}]")
+                else:
+                    lines.append(f"  {label}")
+            graph_context.append("\n".join(lines))
+        else:
+            graph_context.append(f"Domain layer with {len(domain_labels)} node types: {', '.join(domain_labels[:5])}")
+        if domain_rels:
+            rel_strs = []
+            for r in domain_rels:
+                s = f"{r['type']} ({r['from']} -> {r['to']}"
+                if r.get("properties"):
+                    s += f" [{', '.join(r['properties'])}]"
+                s += ")"
+                rel_strs.append(s)
+            graph_context.append(f"Domain relationships: {', '.join(rel_strs)}")
     if has_text_graph:
         graph_context.append(f"Text layer with {len(text_entities)} entity types: {', '.join(text_entities[:5])}")
+        if text_rels:
+            rel_strs = [f"{r['type']} ({r['from']} -> {r['to']})" for r in text_rels]
+            graph_context.append(f"Text relationships: {', '.join(rel_strs)}")
 
     if not graph_context:
         # No graph built yet, return schema strategy

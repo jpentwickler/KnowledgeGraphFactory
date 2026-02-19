@@ -35,6 +35,90 @@ def _get_domain_labels(state: dict) -> list[str]:
     ]
 
 
+def _get_domain_relationships(state: dict) -> list[dict]:
+    """Extract relationship info from approved_construction_plan.
+
+    Returns list of dicts with relationship metadata for graph context.
+    Filters plan entries where construction_type == "relationship".
+
+    Args:
+        state: Pipeline state dictionary
+
+    Returns:
+        List of {"type": "HAS_PART", "from": "Assembly", "to": "Part", "properties": [...]}
+    """
+    plan = get_approved(state, "construction_plan")
+    if not plan:
+        return []
+
+    rels = []
+    for entry in plan.values():
+        if isinstance(entry, dict) and entry.get("construction_type") == "relationship":
+            rels.append({
+                "type": entry.get("relationship_type", ""),
+                "from": entry.get("from_node_label", ""),
+                "to": entry.get("to_node_label", ""),
+                "properties": entry.get("properties", []),
+            })
+    return rels
+
+
+def _get_domain_node_properties(state: dict) -> dict[str, list[str]]:
+    """Extract node labels with their properties from approved_construction_plan.
+
+    Returns a dict mapping each node label to its list of queryable property names.
+    Includes unique_column_name (the Neo4j ID property) alongside explicit properties.
+
+    Args:
+        state: Pipeline state dictionary
+
+    Returns:
+        {"Product": ["product_id", "product_name", "price", "description"], ...}
+    """
+    plan = get_approved(state, "construction_plan")
+    if not plan:
+        return {}
+
+    result = {}
+    for entry in plan.values():
+        if isinstance(entry, dict) and entry.get("construction_type") == "node":
+            label = entry.get("label", "")
+            props = list(entry.get("properties", []))
+            # Include unique_column_name as a queryable property
+            unique_col = entry.get("unique_column_name")
+            if unique_col and unique_col not in props:
+                props.insert(0, unique_col)
+            result[label] = props
+    return result
+
+
+def _get_text_relationships(state: dict) -> list[dict]:
+    """Extract fact types from approved_fact_types.
+
+    Returns list of dicts with relationship metadata for graph context.
+    Reads predicate_label, subject_label, object_label from each entry.
+
+    Args:
+        state: Pipeline state dictionary
+
+    Returns:
+        List of {"type": "has_issue", "from": "Product", "to": "QualityIssue"}
+    """
+    fact_types = get_approved(state, "fact_types")
+    if not fact_types:
+        return []
+
+    rels = []
+    for value in fact_types.values():
+        if isinstance(value, dict):
+            rels.append({
+                "type": value.get("predicate_label", ""),
+                "from": value.get("subject_label", ""),
+                "to": value.get("object_label", ""),
+            })
+    return rels
+
+
 def _get_text_entities(state: dict) -> list[str]:
     """Extract entity type names from approved_entity_types.
 

@@ -10,7 +10,10 @@ Tests:
 import pytest
 from tools.query_tools import (
     _get_domain_labels,
+    _get_domain_node_properties,
+    _get_domain_relationships,
     _get_text_entities,
+    _get_text_relationships,
     format_cypher_results,
     format_retriever_results,
     calculate_confidence,
@@ -77,6 +80,117 @@ def test_get_domain_labels_filters_relationships():
     labels = _get_domain_labels(state)
     assert len(labels) == 2
     assert "REL1" not in labels
+
+
+# =============================================================================
+# Domain Node Properties Tests (4 tests)
+# =============================================================================
+
+def test_get_domain_node_properties_with_valid_plan():
+    """Test extracting node properties from valid construction plan."""
+    state = {
+        "approved_construction_plan": {
+            "Product": {
+                "construction_type": "node",
+                "label": "Product",
+                "unique_column_name": "product_id",
+                "properties": ["product_name", "price", "description"],
+                "source_file": "products.csv"
+            },
+            "Supplier": {
+                "construction_type": "node",
+                "label": "Supplier",
+                "unique_column_name": "supplier_id",
+                "properties": ["name", "city", "country"],
+                "source_file": "suppliers.csv"
+            },
+            "SUPPLIES": {
+                "construction_type": "relationship",
+                "relationship_type": "SUPPLIES",
+                "from_node_label": "Supplier",
+                "to_node_label": "Product",
+                "properties": ["lead_time_days"],
+                "source_file": "supplies.csv"
+            }
+        }
+    }
+
+    result = _get_domain_node_properties(state)
+    assert len(result) == 2
+    assert "Product" in result
+    assert "Supplier" in result
+    assert "SUPPLIES" not in result  # Relationships excluded
+    assert "product_id" in result["Product"]
+    assert "product_name" in result["Product"]
+    assert "price" in result["Product"]
+    assert "supplier_id" in result["Supplier"]
+    assert "name" in result["Supplier"]
+
+
+def test_get_domain_node_properties_without_properties_key():
+    """Test node entry without properties key returns empty list."""
+    state = {
+        "approved_construction_plan": {
+            "Product": {
+                "construction_type": "node",
+                "label": "Product",
+                "source_file": "products.csv"
+            }
+        }
+    }
+
+    result = _get_domain_node_properties(state)
+    assert "Product" in result
+    assert result["Product"] == []
+
+
+def test_get_domain_node_properties_empty_or_missing_plan():
+    """Test empty/missing plan returns empty dict."""
+    assert _get_domain_node_properties({"approved_construction_plan": {}}) == {}
+    assert _get_domain_node_properties({}) == {}
+    assert _get_domain_node_properties({"proposed_construction_plan": {"X": {}}}) == {}
+
+
+def test_get_domain_node_properties_includes_unique_column():
+    """Test that unique_column_name is included and placed first."""
+    state = {
+        "approved_construction_plan": {
+            "Product": {
+                "construction_type": "node",
+                "label": "Product",
+                "unique_column_name": "product_id",
+                "properties": ["product_name", "price"],
+                "source_file": "products.csv"
+            }
+        }
+    }
+
+    result = _get_domain_node_properties(state)
+    props = result["Product"]
+    assert props[0] == "product_id"  # unique_column_name inserted first
+    assert "product_name" in props
+    assert "price" in props
+    assert len(props) == 3
+
+
+def test_get_domain_node_properties_unique_column_already_in_properties():
+    """Test no duplicates when unique_column_name is already in properties."""
+    state = {
+        "approved_construction_plan": {
+            "Product": {
+                "construction_type": "node",
+                "label": "Product",
+                "unique_column_name": "product_id",
+                "properties": ["product_id", "product_name", "price"],
+                "source_file": "products.csv"
+            }
+        }
+    }
+
+    result = _get_domain_node_properties(state)
+    props = result["Product"]
+    assert props.count("product_id") == 1  # No duplicates
+    assert len(props) == 3
 
 
 def test_get_text_entities_with_valid_types():
@@ -183,6 +297,147 @@ def test_entity_types_structure_dict_not_list():
     }
     entities = _get_text_entities(bad_state)
     assert entities == []  # Confirms we're NOT using this structure
+
+
+# =============================================================================
+# Domain Relationship Extraction Tests (4 tests)
+# =============================================================================
+
+def test_get_domain_relationships_with_valid_plan():
+    """Test extracting relationships from valid construction plan."""
+    state = {
+        "approved_construction_plan": {
+            "Product": {
+                "construction_type": "node",
+                "label": "Product",
+                "source_file": "products.csv"
+            },
+            "HAS_PART": {
+                "construction_type": "relationship",
+                "relationship_type": "HAS_PART",
+                "from_node_label": "Assembly",
+                "to_node_label": "Part",
+                "properties": ["quantity"],
+                "source_file": "bom.csv"
+            },
+            "SUPPLIES_PART": {
+                "construction_type": "relationship",
+                "relationship_type": "SUPPLIES_PART",
+                "from_node_label": "Supplier",
+                "to_node_label": "Part",
+                "properties": ["lead_time_days", "unit_cost"],
+                "source_file": "part_supplier_mapping.csv"
+            }
+        }
+    }
+
+    rels = _get_domain_relationships(state)
+    assert len(rels) == 2
+    types = [r["type"] for r in rels]
+    assert "HAS_PART" in types
+    assert "SUPPLIES_PART" in types
+    # Nodes should not appear
+    assert "Product" not in types
+
+
+def test_get_domain_relationships_empty_plan():
+    """Test extracting relationships from empty construction plan."""
+    state = {"approved_construction_plan": {}}
+    rels = _get_domain_relationships(state)
+    assert rels == []
+
+
+def test_get_domain_relationships_missing_approved():
+    """Test extracting relationships when construction plan not approved."""
+    state = {"proposed_construction_plan": {"REL": {"construction_type": "relationship"}}}
+    rels = _get_domain_relationships(state)
+    assert rels == []
+
+
+def test_get_domain_relationships_includes_properties():
+    """Test that properties list is included in extracted relationships."""
+    state = {
+        "approved_construction_plan": {
+            "SUPPLIES_PART": {
+                "construction_type": "relationship",
+                "relationship_type": "SUPPLIES_PART",
+                "from_node_label": "Supplier",
+                "to_node_label": "Part",
+                "properties": ["lead_time_days", "unit_cost", "minimum_order_quantity"],
+                "source_file": "mapping.csv"
+            }
+        }
+    }
+
+    rels = _get_domain_relationships(state)
+    assert len(rels) == 1
+    assert rels[0]["type"] == "SUPPLIES_PART"
+    assert rels[0]["from"] == "Supplier"
+    assert rels[0]["to"] == "Part"
+    assert "lead_time_days" in rels[0]["properties"]
+    assert "unit_cost" in rels[0]["properties"]
+    assert len(rels[0]["properties"]) == 3
+
+
+# =============================================================================
+# Text Relationship Extraction Tests (4 tests)
+# =============================================================================
+
+def test_get_text_relationships_with_valid_types():
+    """Test extracting fact types from valid approved_fact_types."""
+    state = {
+        "approved_fact_types": {
+            "has_issue": {
+                "subject_label": "Product",
+                "predicate_label": "has_issue",
+                "object_label": "QualityIssue"
+            },
+            "reviewed": {
+                "subject_label": "Customer",
+                "predicate_label": "reviewed",
+                "object_label": "Product"
+            }
+        }
+    }
+
+    rels = _get_text_relationships(state)
+    assert len(rels) == 2
+    types = [r["type"] for r in rels]
+    assert "has_issue" in types
+    assert "reviewed" in types
+
+
+def test_get_text_relationships_empty():
+    """Test extracting fact types from empty approved_fact_types."""
+    state = {"approved_fact_types": {}}
+    rels = _get_text_relationships(state)
+    assert rels == []
+
+
+def test_get_text_relationships_missing_approved():
+    """Test extracting fact types when fact_types not approved."""
+    state = {"proposed_fact_types": {"has_issue": {"subject_label": "Product"}}}
+    rels = _get_text_relationships(state)
+    assert rels == []
+
+
+def test_get_text_relationships_structure():
+    """Test that from/to/type fields are correctly mapped."""
+    state = {
+        "approved_fact_types": {
+            "reported": {
+                "subject_label": "Customer",
+                "predicate_label": "reported",
+                "object_label": "QualityIssue"
+            }
+        }
+    }
+
+    rels = _get_text_relationships(state)
+    assert len(rels) == 1
+    assert rels[0]["type"] == "reported"
+    assert rels[0]["from"] == "Customer"
+    assert rels[0]["to"] == "QualityIssue"
 
 
 # =============================================================================

@@ -1268,6 +1268,529 @@ async def kg_query(question: str, context: str = "") -> dict:
         }
 
 
+def _classify_cqs_batch(cqs: dict, state: dict) -> dict:
+    """Classify all CQs in a single Claude call.
+
+    Makes one API call that receives all CQ questions and the graph schema,
+    then classifies each as "cross_layer" (semantic) or "cypher" (structural/
+    aggregation). For cypher CQs, a valid read-only Cypher query is generated.
+
+    Args:
+        cqs: {cq_id: cq_data} subset to classify.
+        state: Pipeline state for schema context extraction.
+
+    Returns:
+        {cq_id: {"strategy": "cross_layer"|"cypher", "cypher_query": str|None}}
+        Falls back to all cross_layer on any error.
+    """
+    import json as _json
+    import anthropic
+    from core.tracing import wrap_anthropic
+    from tools.query_tools import (
+        _get_domain_labels,
+        _get_domain_node_properties,
+        _get_domain_relationships,
+        _get_text_entities,
+        _get_text_relationships,
+        _validate_read_only_cypher,
+    )
+
+    fallback = {cq_id: {"strategy": "cross_layer", "cypher_query": None} for cq_id in cqs}
+
+    try:
+        # Build schema context (same as _select_retrieval_strategy)
+        domain_labels = _get_domain_labels(state)
+        domain_node_props = _get_domain_node_properties(state)
+        domain_rels = _get_domain_relationships(state)
+        text_entities = _get_text_entities(state)
+        text_rels = _get_text_relationships(state)
+
+        graph_context = []
+        if domain_node_props:
+            lines = ["Domain nodes:"]
+            for label, props in domain_node_props.items():
+                if props:
+                    lines.append(f"  {label} [{', '.join(props)}]")
+                else:
+                    lines.append(f"  {label}")
+            graph_context.append("\n".join(lines))
+        elif domain_labels:
+            graph_context.append(f"Domain nodes: {', '.join(domain_labels)}")
+        if domain_rels:
+            rel_strs = []
+            for r in domain_rels:
+                s = f"{r['type']} ({r['from']} -> {r['to']}"
+                if r.get("properties"):
+                    s += f" [{', '.join(r['properties'])}]"
+                s += ")"
+                rel_strs.append(s)
+            graph_context.append(f"Domain relationships: {', '.join(rel_strs)}")
+        if text_entities:
+            graph_context.append(f"Text entities: {', '.join(text_entities[:5])}")
+        if text_rels:
+            rel_strs = [f"{r['type']} ({r['from']} -> {r['to']})" for r in text_rels]
+            graph_context.append(f"Text relationships: {', '.join(rel_strs)}")
+
+        graph_summary = "\n".join(graph_context) if graph_context else "(no graph built yet)"
+
+        system_prompt = f"""You are a knowledge graph query classifier.
+
+Graph schema:
+{graph_summary}
+
+Classify each competency question as either:
+- "cypher": The question asks for counts, aggregations, rankings, or precise
+  structural lookups answerable by a single Cypher query using the known schema.
+  For these, generate a safe, read-only Cypher query.
+- "cross_layer": The question involves semantic understanding, sentiment,
+  qualitative content, or requires searching unstructured text from reviews
+  or documents.
+
+Rules for Cypher queries:
+- Blocked keywords: CREATE, DELETE, SET, REMOVE, MERGE
+- Must contain: MATCH or RETURN
+- Use only the node labels and relationship types listed in the schema above
+- Use property names as they appear in the schema
+
+Respond with JSON only (no markdown):
+{{
+  "<cq_id>": {{
+    "strategy": "cross_layer" | "cypher",
+    "cypher_query": "<query>" | null,
+    "reasoning": "<one sentence>"
+  }},
+  ...
+}}"""
+
+        cq_lines = "\n".join(
+            f"{cq_id}: {cq_data['question']}"
+            for cq_id, cq_data in cqs.items()
+        )
+        user_message = f"Classify these competency questions:\n{cq_lines}"
+
+        client = wrap_anthropic(anthropic.Anthropic())
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=2048,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_message}]
+        )
+
+        response_text = response.content[0].text.strip()
+        if "```json" in response_text:
+            response_text = response_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in response_text:
+            response_text = response_text.split("```")[1].split("```")[0].strip()
+
+        raw = _json.loads(response_text)
+
+        result = {}
+        for cq_id in cqs:
+            entry = raw.get(cq_id, {})
+            strategy = entry.get("strategy", "cross_layer")
+            cypher_query = entry.get("cypher_query") or None
+
+            if strategy == "cypher" and cypher_query:
+                try:
+                    _validate_read_only_cypher(cypher_query)
+                except ValueError:
+                    strategy = "cross_layer"
+                    cypher_query = None
+            elif strategy == "cypher":
+                # No query provided — downgrade
+                strategy = "cross_layer"
+
+            result[cq_id] = {"strategy": strategy, "cypher_query": cypher_query}
+
+        # Fill in any CQ IDs Claude missed
+        for cq_id in cqs:
+            if cq_id not in result:
+                result[cq_id] = {"strategy": "cross_layer", "cypher_query": None}
+
+        return result
+
+    except Exception as e:
+        print(f"Warning: Batch CQ classification failed: {e}")
+        return fallback
+
+
+def _evaluate_single_cq(
+    driver,
+    question: str,
+    state: dict,
+    strategy_result: dict | None = None,
+) -> dict:
+    """Evaluate a single competency question.
+
+    Executes the pre-computed strategy from _classify_cqs_batch, then falls
+    back to remaining semantic strategies if the primary yields no evidence.
+
+    Args:
+        driver: Neo4j driver instance
+        question: CQ question text
+        state: Pipeline state (for cross_layer schema context)
+        strategy_result: Pre-computed {strategy, cypher_query} from
+            _classify_cqs_batch. Defaults to cross_layer when not provided.
+
+    Returns:
+        {
+            "strategy_used": str,
+            "strategies_tried": [str],
+            "evidence_count": int,
+            "has_cross_layer_bridge": bool,
+            "evidence": list               # Capped at 10 items
+        }
+    """
+    from pipelines.query_builder import (
+        _execute_cypher,
+        _execute_vector_search,
+        _execute_hybrid_search,
+        _execute_cross_layer_traversal,
+    )
+
+    strategies_tried = []
+    all_evidence = []
+    has_cross_layer_bridge = False
+    strategy_used = None
+
+    if strategy_result is None:
+        strategy_result = {}
+    primary_strategy = strategy_result.get("strategy", "cross_layer")
+    cypher_query = strategy_result.get("cypher_query")
+    params = {"cypher_query": cypher_query} if cypher_query else {}
+
+    def _try_strategy(strategy, params):
+        """Execute a strategy and return evidence list, or [] on failure."""
+        nonlocal has_cross_layer_bridge
+        try:
+            if strategy == "cypher":
+                query = params.get("cypher_query", "")
+                if not query:
+                    return []
+                result = _execute_cypher(driver, query)
+            elif strategy == "vector":
+                result = _execute_vector_search(driver, question, top_k=5)
+            elif strategy == "hybrid":
+                result = _execute_hybrid_search(driver, question, top_k=5)
+            elif strategy == "cross_layer":
+                result = _execute_cross_layer_traversal(
+                    driver, question, top_k=5, state=state
+                )
+            else:
+                return []
+
+            evidence = result.get("evidence", [])
+            if evidence and strategy == "cross_layer":
+                has_cross_layer_bridge = any(
+                    e.get("metadata", {}).get("domain_entity") is not None
+                    for e in evidence
+                )
+            return evidence
+        except Exception:
+            return []
+
+    # Try primary strategy
+    evidence = _try_strategy(primary_strategy, params)
+    if evidence:
+        strategies_tried.append(primary_strategy)
+        strategy_used = primary_strategy
+        all_evidence.extend(evidence)
+    else:
+        # Fallback: try remaining semantic strategies (skip schema and already-tried)
+        for fallback in ["vector", "hybrid", "cross_layer"]:
+            if fallback == primary_strategy:
+                continue
+            evidence = _try_strategy(fallback, {})
+            if evidence:
+                strategies_tried.append(fallback)
+                if strategy_used is None:
+                    strategy_used = fallback
+                all_evidence.extend(evidence)
+
+    # Deduplicate evidence by first 100 chars of content (or full record for cypher)
+    seen = set()
+    unique_evidence = []
+    for e in all_evidence:
+        key = str(e.get("content") or e)[:100]
+        if key and key not in seen:
+            seen.add(key)
+            unique_evidence.append(e)
+
+    return {
+        "strategy_used": strategy_used or primary_strategy,
+        "strategies_tried": strategies_tried,
+        "evidence_count": len(unique_evidence),
+        "has_cross_layer_bridge": has_cross_layer_bridge,
+        "evidence": unique_evidence[:10],
+    }
+
+
+# Priority sort order for CQ results
+_PRIORITY_ORDER = {"high": 0, "medium": 1, "low": 2}
+
+
+def _run_cq_evaluation(cq_id: str = "", cq_ids: list[str] = None) -> dict:
+    """Core implementation of CQ evaluation (testable without MCP decoration).
+
+    Args:
+        cq_id: Single approved CQ ID to evaluate (e.g., "CQ3").
+        cq_ids: List of approved CQ IDs to evaluate (e.g., ["CQ1", "CQ3"]).
+                If neither provided: evaluates ALL approved CQs.
+
+    Returns:
+        Single CQ: Individual assessment with evidence details.
+        Multiple CQs: Coverage scorecard with per-CQ results.
+    """
+    from datetime import datetime, timezone
+
+    state = _load_clean_state()
+
+    cqs = state.get("approved_competency_questions", {})
+    if not cqs:
+        return {
+            "agent_response": (
+                "No approved competency questions to evaluate.\n\n"
+                "Use kg_user_intent or kg_competency_questions first to "
+                "define and approve competency questions."
+            ),
+            "status": {"error": "no_approved_cqs"},
+        }
+
+    # Determine which CQs to evaluate
+    if cq_id:
+        if cq_id not in cqs:
+            return {
+                "agent_response": (
+                    f"CQ ID '{cq_id}' not found in approved CQs.\n"
+                    f"Available CQ IDs: {', '.join(sorted(cqs.keys()))}"
+                ),
+                "status": {"error": "cq_not_found"},
+            }
+        cqs_to_evaluate = {cq_id: cqs[cq_id]}
+        is_single = True
+    elif cq_ids:
+        cqs_to_evaluate = {
+            cid: cqs[cid] for cid in cq_ids if cid in cqs
+        }
+        if not cqs_to_evaluate:
+            return {
+                "agent_response": (
+                    "None of the provided CQ IDs found in approved CQs.\n"
+                    f"Available CQ IDs: {', '.join(sorted(cqs.keys()))}"
+                ),
+                "status": {"error": "cqs_not_found"},
+            }
+        is_single = False
+    else:
+        cqs_to_evaluate = cqs
+        is_single = False
+
+    # Connect to Neo4j
+    try:
+        driver = get_neo4j_driver()
+    except Exception as exc:
+        return {
+            "agent_response": (
+                f"Failed to connect to Neo4j: {exc}\n\n"
+                "Please check Neo4j credentials and connectivity."
+            ),
+            "status": {"success": False, "error": "neo4j_connection_failed"},
+        }
+
+    try:
+        # Classify all CQs in one Claude call before the evaluation loop
+        classifications = _classify_cqs_batch(cqs_to_evaluate, state)
+
+        results = []
+        answerable_count = 0
+        partial_count = 0
+        not_answerable_count = 0
+
+        for cq_id_iter, cq_data in cqs_to_evaluate.items():
+            question = cq_data["question"]
+            category = cq_data.get("category", "unknown")
+            priority = cq_data.get("priority", "medium")
+
+            cq_strategy = classifications.get(
+                cq_id_iter, {"strategy": "cross_layer", "cypher_query": None}
+            )
+            eval_result = _evaluate_single_cq(
+                driver, question, state, strategy_result=cq_strategy
+            )
+
+            evidence_count = eval_result["evidence_count"]
+            has_bridge = eval_result["has_cross_layer_bridge"]
+            strategy_used = eval_result.get("strategy_used", "")
+
+            # Classify answerability
+            if strategy_used == "cypher" and evidence_count > 0:
+                # Cypher directly answers structural/aggregation questions
+                status = "answerable"
+                answerable_count += 1
+            elif evidence_count > 2 and has_bridge:
+                # Semantic evidence with domain entity linkage
+                status = "answerable"
+                answerable_count += 1
+            elif evidence_count > 0:
+                status = "partial"
+                partial_count += 1
+            else:
+                status = "not_answerable"
+                not_answerable_count += 1
+
+            results.append({
+                "cq_id": cq_id_iter,
+                "question": question,
+                "category": category,
+                "priority": priority,
+                "status": status,
+                "evidence_count": evidence_count,
+                "has_cross_layer_bridge": has_bridge,
+                "strategies_tried": eval_result["strategies_tried"],
+                "strategy_used": strategy_used,
+            })
+
+        # Sort by priority (high > medium > low), then CQ ID
+        results.sort(
+            key=lambda r: (
+                _PRIORITY_ORDER.get(r["priority"], 99),
+                r["cq_id"],
+            )
+        )
+
+        total = len(results)
+        coverage_score = (
+            (answerable_count + 0.5 * partial_count) / total
+            if total > 0 else 0.0
+        )
+
+        # Store results in state
+        state["cq_evaluation_results"] = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "total": total,
+            "answerable": answerable_count,
+            "partial": partial_count,
+            "not_answerable": not_answerable_count,
+            "coverage_score": round(coverage_score, 3),
+            "per_cq_results": results,
+        }
+        _save_state(state)
+
+        if is_single:
+            r = results[0]
+            note = {
+                "answerable": "Evidence found with cross-layer bridge",
+                "partial": "Some evidence found but incomplete coverage",
+                "not_answerable": "No evidence found in the graph",
+            }[r["status"]]
+
+            return {
+                "agent_response": (
+                    f"CQ Assessment: {r['cq_id']}\n\n"
+                    f"Question: {r['question']}\n"
+                    f"Category: {r['category']}\n"
+                    f"Priority: {r['priority']}\n"
+                    f"Status: {r['status'].upper()}\n"
+                    f"Evidence: {r['evidence_count']} items\n"
+                    f"Cross-layer bridge: "
+                    f"{'Yes' if r['has_cross_layer_bridge'] else 'No'}\n"
+                    f"Strategies tried: {', '.join(r['strategies_tried']) or 'none'}\n"
+                    f"Note: {note}"
+                ),
+                "status": {
+                    "success": True,
+                    "cq_id": r["cq_id"],
+                    "question": r["question"],
+                    "category": r["category"],
+                    "priority": r["priority"],
+                    "evidence_found": r["evidence_count"] > 0,
+                    "strategies_tried": r["strategies_tried"],
+                    "evidence_count": r["evidence_count"],
+                    "has_cross_layer_bridge": r["has_cross_layer_bridge"],
+                    "assessment": {
+                        "status": r["status"],
+                        "note": note,
+                    },
+                },
+            }
+        else:
+            lines = [
+                f"Competency Question Evaluation: {total} questions\n",
+                f"Answerable: {answerable_count}",
+                f"Partial: {partial_count}",
+                f"Not Answerable: {not_answerable_count}",
+                f"Coverage Score: {coverage_score:.1%}\n",
+                "Per-CQ Results:",
+            ]
+            for r in results:
+                icon = {
+                    "answerable": "[OK]",
+                    "partial": "[PARTIAL]",
+                    "not_answerable": "[FAIL]",
+                }[r["status"]]
+                q_display = r["question"]
+                if len(q_display) > 60:
+                    q_display = q_display[:60] + "..."
+                lines.append(
+                    f"  {icon} {r['cq_id']}: {q_display} "
+                    f"({r['evidence_count']} evidence)"
+                )
+
+            return {
+                "agent_response": "\n".join(lines),
+                "status": {
+                    "success": True,
+                    "total": total,
+                    "answerable": answerable_count,
+                    "partial": partial_count,
+                    "not_answerable": not_answerable_count,
+                    "coverage_score": round(coverage_score, 3),
+                },
+                "results": results,
+            }
+
+    except Exception as exc:
+        return {
+            "agent_response": (
+                f"CQ evaluation failed: {exc}\n\n"
+                "This may be due to:\n"
+                "- Neo4j connection issues\n"
+                "- Missing OPENAI_API_KEY for vector-based strategies\n"
+                "- Missing indexes (build the text graph first)"
+            ),
+            "status": {"success": False, "error": str(exc)},
+        }
+
+    finally:
+        try:
+            close_driver(driver)
+        except Exception:
+            pass
+
+
+@mcp.tool
+@mcp_traceable(name="mcp.kg_evaluate_cqs")
+def kg_evaluate_cqs(cq_id: str = "", cq_ids: list[str] = None) -> dict:
+    """Evaluate approved competency questions against the knowledge graph.
+
+    Tests whether approved CQs are answerable by gathering evidence from
+    the graph using vector, hybrid, and cross-layer strategies. Returns
+    assessment metrics (not answers).
+
+    Works with approved CQs only. For ad-hoc questions, use kg_query.
+
+    Args:
+        cq_id: Single approved CQ ID to evaluate (e.g., "CQ3").
+        cq_ids: List of approved CQ IDs to evaluate (e.g., ["CQ1", "CQ3"]).
+                If neither provided: evaluates ALL approved CQs.
+
+    Returns:
+        Single CQ: Individual assessment with evidence details.
+        Multiple CQs: Coverage scorecard with per-CQ results.
+    """
+    return _run_cq_evaluation(cq_id, cq_ids)
+
+
 @mcp.tool
 @mcp_traceable(name="mcp.kg_reset_state")
 def kg_reset_state() -> dict:
