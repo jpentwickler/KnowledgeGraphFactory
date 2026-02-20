@@ -11,6 +11,7 @@ ENV/
 # Environment
 .env
 .env.local
+.mcp.json
 
 # IDE
 .vscode/

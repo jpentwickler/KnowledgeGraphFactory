@@ -1,7 +1,41 @@
 {
   "permissions": {
     "allow": [
-      "WebSearch"
+      "WebSearch",
+      "Bash(grep:*)",
+      "WebFetch(domain:neo4j.com)",
+      "WebFetch(domain:github.com)",
+      "Bash(python3:*)",
+      "Bash(python -c:*)",
+      "Bash(pip show:*)",
+      "Bash(pip install:*)",
+      "Bash(python -m pytest:*)",
+      "WebFetch(domain:docs.smith.langchain.com)",
+      "WebFetch(domain:docs.langchain.com)",
+      "WebFetch(domain:reference.langchain.com)",
+      "Bash(git stash:*)",
+      "WebFetch(domain:docs.openclaw.ai)",
+      "WebFetch(domain:medium.com)",
+      "WebFetch(domain:towardsdatascience.com)",
+      "WebFetch(domain:lov.linkeddata.es)",
+      "WebFetch(domain:safeclaw.io)",
+      "WebFetch(domain:openclawwiki.org)",
+      "WebFetch(domain:gist.github.com)",
+      "WebFetch(domain:playbooks.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:ppaolo.substack.com)",
+      "WebFetch(domain:www.getopenclaw.ai)",
+      "WebFetch(domain:zenvanriel.nl)",
+      "WebFetch(domain:www.npmjs.com)",
+      "WebFetch(domain:libraries.io)",
+      "WebFetch(domain:claude.com)",
+      "WebFetch(domain:support.claude.com)",
+      "WebFetch(domain:simonwillison.net)",
+      "WebFetch(domain:www.infoq.com)"
     ]
-  }
+  },
+  "enabledMcpjsonServers": [
+    "kg-factory",
+    "kg-query"
+  ]
 }
