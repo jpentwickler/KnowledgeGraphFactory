@@ -1791,6 +1791,125 @@ def kg_evaluate_cqs(cq_id: str = "", cq_ids: list[str] = None) -> dict:
     return _run_cq_evaluation(cq_id, cq_ids)
 
 
+def _run_kg_diagram(scope: str = "auto") -> dict:
+    """Core implementation of Mermaid diagram generation (testable without MCP).
+
+    Args:
+        scope: What to diagram.
+            "schema" - from approved state artifacts (no Neo4j needed)
+            "live" - from actual Neo4j graph (requires connection)
+            "auto" - try live first, fall back to schema
+
+    Returns:
+        Dict with agent_response, status, and mermaid keys.
+    """
+    from utils.mermaid import generate_schema_diagram, generate_live_diagram
+
+    valid_scopes = ("schema", "live", "auto")
+    if scope not in valid_scopes:
+        return {
+            "agent_response": (
+                f"Invalid scope: '{scope}'.\n\n"
+                f"Valid scopes: {', '.join(valid_scopes)}\n"
+                "- schema: from approved state artifacts (no Neo4j needed)\n"
+                "- live: from actual Neo4j graph (requires connection)\n"
+                "- auto: try live first, fall back to schema"
+            ),
+            "status": {"success": False, "error": "invalid_scope"},
+        }
+
+    state = _load_clean_state()
+    mermaid_markup = ""
+    used_scope = scope
+
+    if scope == "schema":
+        mermaid_markup = generate_schema_diagram(state)
+
+    elif scope == "live":
+        try:
+            driver = get_neo4j_driver()
+            try:
+                mermaid_markup = generate_live_diagram(driver, state)
+            finally:
+                close_driver(driver)
+        except Exception as exc:
+            return {
+                "agent_response": (
+                    f"Failed to generate live diagram: {exc}\n\n"
+                    "Check Neo4j connection or use scope='schema' instead."
+                ),
+                "status": {"success": False, "error": str(exc)},
+            }
+
+    elif scope == "auto":
+        # Try live first, fall back to schema
+        try:
+            driver = get_neo4j_driver()
+            try:
+                mermaid_markup = generate_live_diagram(driver, state)
+                if mermaid_markup:
+                    used_scope = "live"
+            finally:
+                close_driver(driver)
+        except Exception:
+            pass
+
+        if not mermaid_markup:
+            mermaid_markup = generate_schema_diagram(state)
+            if mermaid_markup:
+                used_scope = "schema"
+
+    if not mermaid_markup:
+        return {
+            "agent_response": (
+                "No diagram data available.\n\n"
+                "To generate a schema diagram, approve artifacts first:\n"
+                "- Use kg_schema_proposal for structured schema\n"
+                "- Use kg_ner_extraction / kg_fact_extraction for text layer\n\n"
+                "To generate a live diagram, build the graph first:\n"
+                "- Use kg_build_graph to populate Neo4j"
+            ),
+            "status": {"success": False, "error": "no_data"},
+        }
+
+    # Write diagram.mmd to state directory
+    state_dir = os.environ.get("KG_STATE_DIR", "state")
+    os.makedirs(state_dir, exist_ok=True)
+    diagram_path = os.path.join(state_dir, "diagram.mmd")
+    with open(diagram_path, "w", encoding="utf-8") as f:
+        f.write(mermaid_markup + "\n")
+
+    return {
+        "agent_response": (
+            f"Diagram saved to {diagram_path}\n\n"
+            f"```mermaid\n{mermaid_markup}\n```"
+        ),
+        "status": {"success": True, "scope": used_scope, "file": diagram_path},
+        "mermaid": mermaid_markup,
+    }
+
+
+@mcp.tool
+@mcp_traceable(name="mcp.kg_diagram")
+def kg_diagram(scope: str = "auto") -> dict:
+    """Generate a Mermaid diagram of the knowledge graph schema.
+
+    Creates a visual schema diagram showing node types (with counts for
+    live graphs) and relationship types. Saves to state/diagram.mmd for
+    viewing with a Mermaid viewer.
+
+    Args:
+        scope: What to diagram.
+            "schema" - from approved state artifacts (no Neo4j needed)
+            "live" - from actual Neo4j graph (requires connection)
+            "auto" (default) - try live first, fall back to schema
+
+    Returns:
+        Dict with Mermaid markup, file path, and status metadata.
+    """
+    return _run_kg_diagram(scope)
+
+
 @mcp.tool
 @mcp_traceable(name="mcp.kg_reset_state")
 def kg_reset_state() -> dict:
