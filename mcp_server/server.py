@@ -10,6 +10,11 @@ All artifacts are persisted in state (proposed/approved values).
 
 import os
 import sys
+import threading
+import asyncio
+import uuid
+import inspect
+import functools
 
 # Add parent directory to path so we can import from kg-factory modules
 _root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -81,11 +86,94 @@ user through the process. Let them do their job.
 4. Repeat until the agent confirms approval
 5. Each stage must be approved before moving to the next
 6. Use kg_reset_state to start over if needed
+
+## Background Processing
+
+Some tools may return {"processing": true, "task_id": "..."} instead of
+immediate results. When this happens:
+1. Show the user that processing has started
+2. Wait 5-10 seconds
+3. Call kg_get_result(task_id) to check for the result
+4. If still processing, wait and retry (up to ~2 minutes)
+5. Once complete, show the full result to the user
 """
 )
 
 # Session-scoped active project (set by kg_project tool).
 _active_project: str | None = None
+
+# Background task storage (for async mode in Cowork)
+_background_results: dict[str, dict] = {}    # task_id -> result dict
+_background_lock = threading.Lock()
+
+
+def _is_async_mode() -> bool:
+    """Check if async background execution is enabled."""
+    return os.environ.get("KG_ASYNC_TOOLS", "").lower() == "true"
+
+
+def _start_background(func, task_id: str, *args, **kwargs):
+    """Run func in a background thread, store result when done.
+
+    For async functions, creates a new event loop in the thread.
+    For sync functions, calls directly.
+    """
+    def _worker():
+        try:
+            if asyncio.iscoroutinefunction(func):
+                loop = asyncio.new_event_loop()
+                try:
+                    result = loop.run_until_complete(func(*args, **kwargs))
+                finally:
+                    loop.close()
+            else:
+                result = func(*args, **kwargs)
+        except Exception as e:
+            result = {
+                "agent_response": f"Background task failed: {e}",
+                "status": {"error": str(e)},
+            }
+        with _background_lock:
+            _background_results[task_id] = result
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+
+
+def _async_capable(tool_name: str):
+    """Decorator: in async mode, run tool in background and return task ID."""
+    def decorator(func):
+        original_sig = inspect.signature(func)
+
+        if asyncio.iscoroutinefunction(func):
+            @functools.wraps(func)
+            async def wrapper(*args, **kwargs):
+                if not _is_async_mode():
+                    return await func(*args, **kwargs)
+                task_id = f"{tool_name}_{uuid.uuid4().hex[:8]}"
+                _start_background(func, task_id, *args, **kwargs)
+                return {
+                    "processing": True,
+                    "task_id": task_id,
+                    "message": f"Started {tool_name}. Call kg_get_result('{task_id}') to check progress.",
+                }
+        else:
+            @functools.wraps(func)
+            def wrapper(*args, **kwargs):
+                if not _is_async_mode():
+                    return func(*args, **kwargs)
+                task_id = f"{tool_name}_{uuid.uuid4().hex[:8]}"
+                _start_background(func, task_id, *args, **kwargs)
+                return {
+                    "processing": True,
+                    "task_id": task_id,
+                    "message": f"Started {tool_name}. Call kg_get_result('{task_id}') to check progress.",
+                }
+
+        # Preserve original signature for FastMCP schema generation
+        wrapper.__signature__ = original_sig
+        return wrapper
+    return decorator
 
 
 def _get_state_file() -> str:
@@ -236,6 +324,37 @@ def kg_get_state() -> dict:
     if os.environ.get("KG_BASE_DIR"):
         result["_active_project"] = _active_project
     return result
+
+
+def _run_kg_get_result(task_id: str) -> dict:
+    """Core implementation (testable without MCP decoration)."""
+    with _background_lock:
+        if task_id in _background_results:
+            return _background_results.pop(task_id)
+    return {
+        "processing": True,
+        "task_id": task_id,
+        "message": "Still processing. Call kg_get_result again in a few seconds.",
+    }
+
+
+@mcp.tool
+@mcp_traceable(name="mcp.kg_get_result")
+def kg_get_result(task_id: str) -> dict:
+    """Check the result of a background task.
+
+    When a tool returns {"processing": true, "task_id": "..."}, call this
+    tool with that task_id to check if it has finished. If still processing,
+    wait a few seconds and try again.
+
+    Args:
+        task_id: The task ID returned by the original tool call.
+
+    Returns:
+        The original tool's result if complete, or
+        {"processing": true, "task_id": ..., "message": ...} if still running.
+    """
+    return _run_kg_get_result(task_id)
 
 
 # ---------------------------------------------------------------------------
@@ -580,6 +699,7 @@ def kg_project(message: str) -> dict:
 
 @mcp.tool
 @mcp_traceable(name="mcp.kg_user_intent")
+@_async_capable("kg_user_intent")
 def kg_user_intent(message: str) -> dict:
     """Send a message to the User Intent Agent.
 
@@ -631,6 +751,7 @@ def kg_user_intent(message: str) -> dict:
 
 @mcp.tool
 @mcp_traceable(name="mcp.kg_file_suggestion")
+@_async_capable("kg_file_suggestion")
 def kg_file_suggestion(message: str) -> dict:
     """Send a message to the File Suggestion Agent.
 
@@ -677,6 +798,7 @@ def kg_file_suggestion(message: str) -> dict:
 
 @mcp.tool
 @mcp_traceable(name="mcp.kg_schema_proposal")
+@_async_capable("kg_schema_proposal")
 def kg_schema_proposal(message: str) -> dict:
     """Send a message to the Schema Proposal Agent.
 
@@ -735,6 +857,7 @@ def kg_schema_proposal(message: str) -> dict:
 
 @mcp.tool
 @mcp_traceable(name="mcp.kg_competency_questions")
+@_async_capable("kg_competency_questions")
 def kg_competency_questions(message: str) -> dict:
     """Send a message to the Competency Questions Management Agent.
 
@@ -787,6 +910,7 @@ def kg_competency_questions(message: str) -> dict:
 
 @mcp.tool
 @mcp_traceable(name="mcp.kg_critic")
+@_async_capable("kg_critic")
 def kg_critic(scope: str = "structured") -> dict:
     """Run the critic agent to review proposed artifacts for problems.
 
@@ -874,6 +998,7 @@ def kg_critic(scope: str = "structured") -> dict:
 
 @mcp.tool
 @mcp_traceable(name="mcp.kg_ner_extraction")
+@_async_capable("kg_ner_extraction")
 def kg_ner_extraction(message: str) -> dict:
     """Send a message to the NER Extraction Agent.
 
@@ -938,6 +1063,7 @@ def kg_ner_extraction(message: str) -> dict:
 
 @mcp.tool
 @mcp_traceable(name="mcp.kg_fact_extraction")
+@_async_capable("kg_fact_extraction")
 def kg_fact_extraction(message: str) -> dict:
     """Send a message to the Fact Extraction Agent.
 
@@ -1364,6 +1490,7 @@ def _build_resolve(state, driver):
 
 @mcp.tool
 @mcp_traceable(name="mcp.kg_build_graph")
+@_async_capable("kg_build_graph")
 async def kg_build_graph(message: str = "build", scope: str = "structured") -> dict:
     """Build the knowledge graph in Neo4j from approved artifacts.
 
@@ -1538,6 +1665,7 @@ async def kg_build_graph(message: str = "build", scope: str = "structured") -> d
 
 @mcp.tool
 @mcp_traceable(name="mcp.kg_query")
+@_async_capable("kg_query")
 async def kg_query(question: str, context: str = "") -> dict:
     """Query the knowledge graph with adaptive retrieval.
 
@@ -2152,6 +2280,7 @@ def _run_cq_evaluation(cq_id: str = "", cq_ids: list[str] = None) -> dict:
 
 @mcp.tool
 @mcp_traceable(name="mcp.kg_evaluate_cqs")
+@_async_capable("kg_evaluate_cqs")
 def kg_evaluate_cqs(cq_id: str = "", cq_ids: list[str] = None) -> dict:
     """Evaluate approved competency questions against the knowledge graph.
 
@@ -2276,6 +2405,7 @@ def _run_kg_diagram(scope: str = "auto") -> dict:
 
 @mcp.tool
 @mcp_traceable(name="mcp.kg_diagram")
+@_async_capable("kg_diagram")
 def kg_diagram(scope: str = "auto") -> dict:
     """Generate a Mermaid diagram of the knowledge graph schema.
 
