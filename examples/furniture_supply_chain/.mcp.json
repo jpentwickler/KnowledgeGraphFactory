@@ -4,7 +4,10 @@
       "command": "python",
       "args": [
         "C:\\Users\\jprob\\Documents\\Personal\\VisualStudio\\KnowledgeGraphFactory\\mcp_server\\server.py"
-      ]
+      ],
+      "env": {
+        "KG_BASE_DIR": "C:\\Users\\jprob\\Documents\\Personal\\VisualStudio\\KnowledgeGraphFactory\\examples"
+      }
     }
   }
 }

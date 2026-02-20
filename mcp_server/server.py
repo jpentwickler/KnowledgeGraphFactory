@@ -84,11 +84,20 @@ user through the process. Let them do their job.
 """
 )
 
-# State file path - defaults to state/current_state.json relative to working directory
-STATE_FILE = os.path.join(
-    os.environ.get("KG_STATE_DIR", "state"),
-    "current_state.json"
-)
+# Session-scoped active project (set by kg_project tool).
+_active_project: str | None = None
+
+
+def _get_state_file() -> str:
+    """Resolve the state file path based on active project or env vars.
+
+    Priority: KG_BASE_DIR + _active_project > KG_STATE_DIR > default.
+    """
+    base_dir = os.environ.get("KG_BASE_DIR")
+    if base_dir and _active_project:
+        return os.path.join(base_dir, _active_project, "state", "current_state.json")
+    state_dir = os.environ.get("KG_STATE_DIR", "state")
+    return os.path.join(state_dir, "current_state.json")
 
 # Rolling window: max conversation messages stored per agent.
 # ~5 full exchanges (user + assistant + tool pairs).
@@ -186,7 +195,7 @@ def _load_clean_state() -> dict:
     Strips ephemeral underscore-prefixed keys (e.g. _critic_verdict)
     but preserves conversation keys (e.g. _user_intent_conversation).
     """
-    raw_state = load_state(STATE_FILE)
+    raw_state = load_state(_get_state_file())
     return {k: v for k, v in raw_state.items() if _should_persist(k)}
 
 
@@ -196,7 +205,7 @@ def _save_state(state: dict) -> None:
     Merges updated state into the existing file so that keys not touched
     by this agent call are preserved.
     """
-    raw_state = load_state(STATE_FILE)
+    raw_state = load_state(_get_state_file())
 
     # Keep artifacts + conversation keys from existing state
     clean_raw = {k: v for k, v in raw_state.items() if _should_persist(k)}
@@ -207,7 +216,7 @@ def _save_state(state: dict) -> None:
     # Final clean: remove any ephemeral keys that came from agent
     final = {k: v for k, v in clean_raw.items() if _should_persist(k)}
 
-    save_state(final, STATE_FILE)
+    save_state(final, _get_state_file())
 
 
 @mcp.tool
@@ -223,7 +232,350 @@ def kg_get_state() -> dict:
     """
     state = _load_clean_state()
     # Exclude conversation keys from public display
-    return {k: v for k, v in state.items() if not _is_conversation_key(k)}
+    result = {k: v for k, v in state.items() if not _is_conversation_key(k)}
+    if os.environ.get("KG_BASE_DIR"):
+        result["_active_project"] = _active_project
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Project management helpers
+# ---------------------------------------------------------------------------
+
+import re as _re
+
+
+def _check_project_active() -> dict | None:
+    """Return error dict if KG_BASE_DIR is set but no project is active. None to proceed."""
+    if not os.environ.get("KG_BASE_DIR"):
+        return None  # backwards compat -- no guard
+    if _active_project:
+        return None  # project selected -- proceed
+    return {
+        "agent_response": (
+            "No project selected. Use kg_project to list, open, or create a project first.\n\n"
+            "Examples:\n"
+            "  kg_project('list')\n"
+            "  kg_project('create my_project')\n"
+            "  kg_project('open my_project')"
+        ),
+        "status": {"error": "no_active_project"},
+    }
+
+
+def _validate_project_name(name: str) -> str | None:
+    """Return error message if name is invalid, None if valid."""
+    if not name:
+        return "Project name cannot be empty."
+    if ".." in name or "/" in name or "\\" in name:
+        return "Project name cannot contain '..', '/' or '\\'."
+    if " " in name:
+        return "Project name cannot contain spaces. Use underscores or hyphens."
+    if not _re.fullmatch(r"[A-Za-z0-9_-]+", name):
+        return "Project name must contain only letters, digits, underscores, or hyphens."
+    return None
+
+
+def _detect_stage(state: dict) -> str:
+    """Determine how far the pipeline has progressed."""
+    if state.get("cq_evaluation_results"):
+        return "evaluated"
+    if state.get("text_graph_progress"):
+        return "graph built"
+    if state.get("approved_construction_plan"):
+        return "schema approved"
+    if state.get("approved_files"):
+        return "files selected"
+    if state.get("approved_user_goal"):
+        return "goal defined"
+    return "new"
+
+
+def _count_data_files(data_dir: str) -> int:
+    """Count CSV and markdown files under data_dir."""
+    count = 0
+    if not os.path.isdir(data_dir):
+        return 0
+    for root, _dirs, files in os.walk(data_dir):
+        for f in files:
+            if f.endswith((".csv", ".md", ".markdown")):
+                count += 1
+    return count
+
+
+def _activate_project(name: str, base_dir: str) -> None:
+    """Set active project and update KG_DATA_DIR for file_tools."""
+    global _active_project
+    _active_project = name
+    os.environ["KG_DATA_DIR"] = os.path.join(base_dir, name, "data")
+
+    # Write marker for query server
+    marker = os.path.join(base_dir, "_last_active_project")
+    with open(marker, "w", encoding="utf-8") as f:
+        f.write(name)
+
+    # Clear all in-memory agent conversations from previous project
+    state = _load_clean_state()
+    conv_keys = [k for k in state if _is_conversation_key(k)]
+    for k in conv_keys:
+        del state[k]
+    if conv_keys:
+        _save_state(state)
+
+
+def _parse_project_command(message: str) -> tuple[str, str]:
+    """Parse command and argument from message.
+
+    Returns:
+        (command, argument) tuple. command is one of:
+        'list', 'create', 'open', 'status', 'unknown'.
+    """
+    msg = message.strip().lower()
+
+    if msg in ("list", "ls"):
+        return ("list", "")
+    if msg in ("status", "info"):
+        return ("status", "")
+
+    # For commands with arguments, preserve original case of the argument
+    stripped = message.strip()
+    if msg.startswith(("create ", "new ")):
+        arg_start = stripped.index(" ") + 1
+        return ("create", stripped[arg_start:].strip())
+    if msg.startswith("open "):
+        return ("open", stripped[5:].strip())
+
+    return ("unknown", message)
+
+
+def _project_list(base_dir: str) -> dict:
+    """List available projects under base_dir."""
+    if not os.path.isdir(base_dir):
+        return {
+            "agent_response": f"Base directory does not exist: {base_dir}",
+            "status": {"error": "base_dir_missing"},
+        }
+
+    projects = []
+    for entry in sorted(os.listdir(base_dir)):
+        entry_path = os.path.join(base_dir, entry)
+        if not os.path.isdir(entry_path):
+            continue
+        # Must have state/ or data/ subfolder to be a project
+        has_state = os.path.isdir(os.path.join(entry_path, "state"))
+        has_data = os.path.isdir(os.path.join(entry_path, "data"))
+        if not (has_state or has_data):
+            continue
+
+        # Load state to detect stage
+        state_file = os.path.join(entry_path, "state", "current_state.json")
+        try:
+            project_state = load_state(state_file)
+        except Exception:
+            project_state = {}
+
+        stage = _detect_stage(project_state)
+        data_count = _count_data_files(os.path.join(entry_path, "data"))
+
+        projects.append({
+            "name": entry,
+            "stage": stage,
+            "data_files": data_count,
+        })
+
+    if not projects:
+        lines = [
+            "No projects found.\n",
+            "Create one with: kg_project('create my_project')",
+        ]
+    else:
+        lines = ["Available projects:"]
+        for i, p in enumerate(projects, 1):
+            active = " (active)" if p["name"] == _active_project else ""
+            lines.append(
+                f"  {i}. {p['name']} ({p['stage']}, {p['data_files']} data files){active}"
+            )
+
+        lines.append("")
+        if _active_project:
+            lines.append(f"Active project: {_active_project}")
+        else:
+            lines.append("No project selected.")
+
+    return {
+        "agent_response": "\n".join(lines),
+        "status": {"projects": projects, "active_project": _active_project},
+    }
+
+
+def _project_create(name: str, base_dir: str) -> dict:
+    """Create a new project."""
+    error = _validate_project_name(name)
+    if error:
+        return {
+            "agent_response": f"Invalid project name: {error}",
+            "status": {"error": "invalid_name"},
+        }
+
+    project_dir = os.path.join(base_dir, name)
+    if os.path.exists(project_dir):
+        return {
+            "agent_response": (
+                f"Project '{name}' already exists. Use kg_project('open {name}') to open it."
+            ),
+            "status": {"error": "already_exists"},
+        }
+
+    # Create directories
+    os.makedirs(os.path.join(project_dir, "state"), exist_ok=True)
+    os.makedirs(os.path.join(project_dir, "data"), exist_ok=True)
+
+    _activate_project(name, base_dir)
+
+    data_path = os.path.join(base_dir, name, "data")
+    return {
+        "agent_response": (
+            f'Project "{name}" created.\n'
+            f"  State: {os.path.join(base_dir, name, 'state')}\n"
+            f"  Data:  {data_path}\n\n"
+            "Place your CSV and markdown files in the data directory, "
+            "then we can start defining your graph goal."
+        ),
+        "status": {"created": name, "active_project": name, "data_dir": data_path},
+    }
+
+
+def _project_open(name: str, base_dir: str) -> dict:
+    """Open an existing project."""
+    project_dir = os.path.join(base_dir, name)
+    if not os.path.isdir(project_dir):
+        return {
+            "agent_response": (
+                f"Project '{name}' not found. Use kg_project('create {name}') to create it."
+            ),
+            "status": {"error": "not_found"},
+        }
+
+    _activate_project(name, base_dir)
+
+    # Load and summarize state
+    state = _load_clean_state()
+    stage = _detect_stage(state)
+    data_count = _count_data_files(os.path.join(base_dir, name, "data"))
+
+    # Summarize approved artifacts
+    artifacts = []
+    if state.get("approved_user_goal"):
+        goal = state["approved_user_goal"]
+        goal_text = goal.get("description", "") if isinstance(goal, dict) else str(goal)
+        artifacts.append(f"  Goal: {goal_text[:100]}")
+    if state.get("approved_files"):
+        files = state["approved_files"]
+        structured = files.get("structured", [])
+        unstructured = files.get("unstructured", [])
+        artifacts.append(f"  Files: {len(structured)} structured, {len(unstructured)} unstructured")
+    if state.get("approved_construction_plan"):
+        plan = state["approved_construction_plan"]
+        artifacts.append(f"  Schema: {len(plan)} entries")
+    if state.get("approved_entity_types"):
+        artifacts.append(f"  Entity types: {len(state['approved_entity_types'])}")
+    if state.get("approved_fact_types"):
+        artifacts.append(f"  Fact types: {len(state['approved_fact_types'])}")
+
+    lines = [
+        f'Opened project "{name}".',
+        f"  Stage: {stage}",
+        f"  Data files: {data_count}",
+    ]
+    if artifacts:
+        lines.append("  Approved artifacts:")
+        lines.extend(f"    {a.strip()}" for a in artifacts)
+
+    return {
+        "agent_response": "\n".join(lines),
+        "status": {"opened": name, "active_project": name, "stage": stage},
+    }
+
+
+def _project_status(base_dir: str) -> dict:
+    """Return active project info or guidance."""
+    if not _active_project:
+        return {
+            "agent_response": (
+                "No project selected.\n\n"
+                "Use kg_project('list') to see available projects, or\n"
+                "kg_project('create <name>') to start a new one."
+            ),
+            "status": {"active_project": None},
+        }
+
+    state = _load_clean_state()
+    stage = _detect_stage(state)
+    data_count = _count_data_files(os.path.join(base_dir, _active_project, "data"))
+
+    return {
+        "agent_response": (
+            f"Active project: {_active_project}\n"
+            f"  Stage: {stage}\n"
+            f"  Data files: {data_count}"
+        ),
+        "status": {"active_project": _active_project, "stage": stage, "data_files": data_count},
+    }
+
+
+def _run_kg_project(message: str) -> dict:
+    """Core implementation of project management (testable without MCP)."""
+    base_dir = os.environ.get("KG_BASE_DIR")
+    if not base_dir:
+        return {
+            "agent_response": (
+                "KG_BASE_DIR not set. Set it in your MCP server config to enable "
+                "project management.\n\n"
+                "Example in claude_desktop_config.json:\n"
+                '  "env": {"KG_BASE_DIR": "/path/to/projects"}'
+            ),
+            "status": {"error": "no_base_dir"},
+        }
+
+    command, arg = _parse_project_command(message)
+
+    if command == "list":
+        return _project_list(base_dir)
+    elif command == "create":
+        return _project_create(arg, base_dir)
+    elif command == "open":
+        return _project_open(arg, base_dir)
+    elif command == "status":
+        return _project_status(base_dir)
+    else:
+        return {
+            "agent_response": (
+                "Unknown command. Available commands:\n\n"
+                "  kg_project('list')           - List available projects\n"
+                "  kg_project('create <name>')  - Create a new project\n"
+                "  kg_project('open <name>')    - Open an existing project\n"
+                "  kg_project('status')         - Show active project info"
+            ),
+            "status": {"error": "unknown_command"},
+        }
+
+
+@mcp.tool
+@mcp_traceable(name="mcp.kg_project")
+def kg_project(message: str) -> dict:
+    """Manage KG-Factory projects.
+
+    Use 'list' to see projects, 'create <name>' to start a new one,
+    'open <name>' to switch to an existing one, 'status' to see the
+    active project.
+
+    Args:
+        message: Command string (e.g., "list", "create my_project", "open my_project", "status").
+
+    Returns:
+        Dictionary with project info and status.
+    """
+    return _run_kg_project(message)
 
 
 @mcp.tool
@@ -242,6 +594,9 @@ def kg_user_intent(message: str) -> dict:
     Returns:
         Dictionary with agent response and current status.
     """
+    guard = _check_project_active()
+    if guard:
+        return guard
     state = _load_clean_state()
     conversation = _pop_conversation(state, "_user_intent_conversation")
 
@@ -291,6 +646,9 @@ def kg_file_suggestion(message: str) -> dict:
     Returns:
         Dictionary with agent response and current status.
     """
+    guard = _check_project_active()
+    if guard:
+        return guard
     state = _load_clean_state()
     conversation = _pop_conversation(state, "_file_suggestion_conversation")
 
@@ -334,6 +692,9 @@ def kg_schema_proposal(message: str) -> dict:
     Returns:
         Dictionary with agent response and current status.
     """
+    guard = _check_project_active()
+    if guard:
+        return guard
     state = _load_clean_state()
     conversation = _pop_conversation(state, "_schema_proposal_conversation")
 
@@ -390,6 +751,9 @@ def kg_competency_questions(message: str) -> dict:
     Returns:
         Dictionary with agent response and current status.
     """
+    guard = _check_project_active()
+    if guard:
+        return guard
     state = _load_clean_state()
     conversation = _pop_conversation(state, "_competency_questions_conversation")
 
@@ -447,6 +811,9 @@ def kg_critic(scope: str = "structured") -> dict:
     Returns:
         Dictionary with critic verdict, problems list, and response text.
     """
+    guard = _check_project_active()
+    if guard:
+        return guard
     state = _load_clean_state()
 
     if scope == "structured":
@@ -523,6 +890,9 @@ def kg_ner_extraction(message: str) -> dict:
     Returns:
         Dictionary with agent response, status, and pre-computation summary.
     """
+    guard = _check_project_active()
+    if guard:
+        return guard
     state = _load_clean_state()
     conversation = _pop_conversation(state, "_ner_extraction_conversation")
 
@@ -584,6 +954,9 @@ def kg_fact_extraction(message: str) -> dict:
     Returns:
         Dictionary with agent response, status, and pre-computation summary.
     """
+    guard = _check_project_active()
+    if guard:
+        return guard
     state = _load_clean_state()
     conversation = _pop_conversation(state, "_fact_extraction_conversation")
 
@@ -1009,6 +1382,9 @@ async def kg_build_graph(message: str = "build", scope: str = "structured") -> d
     Returns:
         Dictionary with build results, verification stats, and any errors.
     """
+    guard = _check_project_active()
+    if guard:
+        return guard
     valid_scopes = ("structured", "unstructured", "resolve", "all")
     if scope not in valid_scopes:
         return {
@@ -1206,6 +1582,9 @@ async def kg_query(question: str, context: str = "") -> dict:
         # Cross-layer traversal
         kg_query("What suppliers are mentioned in reviews?")
     """
+    guard = _check_project_active()
+    if guard:
+        return guard
     from pipelines.query_builder import (
         _select_retrieval_strategy,
         _execute_schema_query,
@@ -1541,6 +1920,9 @@ def _run_cq_evaluation(cq_id: str = "", cq_ids: list[str] = None) -> dict:
         Single CQ: Individual assessment with evidence details.
         Multiple CQs: Coverage scorecard with per-CQ results.
     """
+    guard = _check_project_active()
+    if guard:
+        return guard
     from datetime import datetime, timezone
 
     state = _load_clean_state()
@@ -1803,6 +2185,9 @@ def _run_kg_diagram(scope: str = "auto") -> dict:
     Returns:
         Dict with agent_response, status, and mermaid keys.
     """
+    guard = _check_project_active()
+    if guard:
+        return guard
     from utils.mermaid import generate_schema_diagram, generate_live_diagram
 
     valid_scopes = ("schema", "live", "auto")
@@ -1873,7 +2258,7 @@ def _run_kg_diagram(scope: str = "auto") -> dict:
         }
 
     # Write diagram.mmd to state directory
-    state_dir = os.environ.get("KG_STATE_DIR", "state")
+    state_dir = os.path.dirname(_get_state_file())
     os.makedirs(state_dir, exist_ok=True)
     diagram_path = os.path.join(state_dir, "diagram.mmd")
     with open(diagram_path, "w", encoding="utf-8") as f:
@@ -1921,7 +2306,7 @@ def kg_reset_state() -> dict:
     Returns:
         Confirmation message.
     """
-    save_state({}, STATE_FILE)
+    save_state({}, _get_state_file())
     return {"message": "State reset. Ready to start fresh."}
 
 

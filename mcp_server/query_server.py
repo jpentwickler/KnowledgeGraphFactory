@@ -69,11 +69,23 @@ KG-Query provides adaptive retrieval over a domain knowledge graph.
 """
 )
 
-# State file path - defaults to state/current_state.json relative to working directory
-STATE_FILE = os.path.join(
-    os.environ.get("KG_STATE_DIR", "state"),
-    "current_state.json"
-)
+def _get_state_file() -> str:
+    """Resolve the state file path, supporting KG_BASE_DIR project layout.
+
+    Reads the _last_active_project marker written by the construction server
+    to determine which project's state to load.
+    """
+    base_dir = os.environ.get("KG_BASE_DIR")
+    if base_dir:
+        marker = os.path.join(base_dir, "_last_active_project")
+        if os.path.isfile(marker):
+            with open(marker, "r", encoding="utf-8") as f:
+                project = f.read().strip()
+            if project:
+                return os.path.join(base_dir, project, "state", "current_state.json")
+    state_dir = os.environ.get("KG_STATE_DIR", "state")
+    return os.path.join(state_dir, "current_state.json")
+
 
 # Module-level state
 _driver = None
@@ -93,7 +105,7 @@ def _load_state_once() -> dict:
     """Load state file once, cache in module. Returns shallow copy per call."""
     global _state, _state_loaded
     if not _state_loaded:
-        _state = load_state(STATE_FILE)
+        _state = load_state(_get_state_file())
         _state_loaded = True
     return dict(_state)
 
