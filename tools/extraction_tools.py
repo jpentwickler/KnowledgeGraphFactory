@@ -7,8 +7,12 @@ Provides:
 """
 
 import copy
+import json
+import logging
 import os
 import re
+
+import anthropic
 
 from core import (
     create_tool_schema,
@@ -18,10 +22,13 @@ from core import (
     get_approved,
     has_approved,
 )
+from core.tracing import traceable, wrap_anthropic
 
 # Regex for valid predicate labels: lowercase letters, digits, underscores only
 _PREDICATE_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 from tools.file_tools import _get_data_dir, _normalize_path
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +146,493 @@ def build_well_known_types(state: dict) -> str:
         if entry.get("construction_type") == "node"
     ]
     return ", ".join(types) if types else "(none)"
+
+
+# ---------------------------------------------------------------------------
+# Structured Output: File Content, Proposals, Evidence, Merging (US020)
+# ---------------------------------------------------------------------------
+
+
+def build_file_content(
+    state: dict, max_chars: int = 50_000
+) -> tuple[str | dict[str, str], bool]:
+    """Read full text of all approved unstructured files.
+
+    Returns:
+        (content, fits_in_one_call):
+        - If total content <= max_chars: content is a single string with
+          all files concatenated (with file headers and line numbers),
+          fits_in_one_call=True.
+        - If total content > max_chars: content is a dict mapping
+          file path -> full text (with line numbers), fits_in_one_call=False.
+    """
+    if not has_approved(state, "files"):
+        return "", True
+
+    approved = get_approved(state, "files")
+    unstructured = approved.get("unstructured", [])
+    if not unstructured:
+        return "", True
+
+    data_dir = _get_data_dir()
+
+    # Read all files
+    file_texts: dict[str, str] = {}
+    total_chars = 0
+
+    for file_entry in unstructured:
+        path = file_entry["path"]
+        abs_path = os.path.join(data_dir, path)
+        abs_path = os.path.abspath(abs_path)
+
+        if not os.path.isfile(abs_path):
+            file_texts[path] = f"=== {path} ===\n[ERROR: File not found]\n"
+            total_chars += len(file_texts[path])
+            continue
+
+        try:
+            with open(abs_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        except Exception as exc:
+            file_texts[path] = f"=== {path} ===\n[ERROR: {exc}]\n"
+            total_chars += len(file_texts[path])
+            continue
+
+        # Format with line numbers
+        numbered = []
+        numbered.append(f"=== {path} ({len(lines)} lines) ===\n")
+        for i, line in enumerate(lines, 1):
+            numbered.append(f"{i:4d} | {line.rstrip()}")
+        text = "\n".join(numbered)
+        file_texts[path] = text
+        total_chars += len(text)
+
+    if total_chars <= max_chars:
+        # Small content: concatenate all files
+        combined = "\n\n".join(file_texts.values())
+        return combined, True
+    else:
+        # Large content: return per-file dict
+        return file_texts, False
+
+
+# --- JSON Schemas for structured output ---
+
+ENTITY_TYPE_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "entity_types": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "source": {
+                        "type": "string",
+                        "enum": ["well_known", "discovered"],
+                    },
+                    "description": {"type": "string"},
+                    "evidence_patterns": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                },
+                "required": [
+                    "name",
+                    "source",
+                    "description",
+                    "evidence_patterns",
+                ],
+                "additionalProperties": False,
+            },
+        },
+        "analysis_summary": {"type": "string"},
+    },
+    "required": ["entity_types", "analysis_summary"],
+    "additionalProperties": False,
+}
+
+FACT_TYPE_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "fact_types": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "subject": {"type": "string"},
+                    "predicate": {"type": "string"},
+                    "object": {"type": "string"},
+                    "description": {"type": "string"},
+                },
+                "required": [
+                    "subject",
+                    "predicate",
+                    "object",
+                    "description",
+                ],
+                "additionalProperties": False,
+            },
+        },
+        "analysis_summary": {"type": "string"},
+    },
+    "required": ["fact_types", "analysis_summary"],
+    "additionalProperties": False,
+}
+
+
+def _build_ner_prompt(state: dict, file_content: str) -> str:
+    """Build the system prompt for NER structured-output call."""
+    user_goal = get_approved(state, "user_goal") or {}
+    goal_str = format_user_goal(user_goal)
+    well_known = build_well_known_types(state)
+
+    from tools.competency_tools import format_competency_questions
+
+    cqs = format_competency_questions(state)
+
+    return f"""\
+You are a named entity recognition specialist for knowledge graphs.
+Analyze the provided text and propose entity types (categories, NOT instances).
+
+## User Goal
+{goal_str}
+
+## Competency Questions
+{cqs}
+
+## Well-Known Entity Types (from existing graph schema)
+{well_known}
+
+## Quality Guidelines
+- Entity types must be singular nouns in PascalCase (e.g., ProductIssue)
+- Always include well-known types if they appear in the text (source: well_known)
+- Discovered types should add depth or breadth to the graph (source: discovered)
+- Do NOT propose quantities/measurements (Rating, Price, Age) -- those are properties
+- Do NOT propose overly specific types (prefer Issue over BrokenLeg)
+- Quality over quantity: 3-6 meaningful types is better than 12 vague ones
+- For each type, provide 2-3 evidence_patterns (search terms to verify in text)
+
+## File Content
+{file_content}
+
+Return a JSON object with entity_types array and analysis_summary."""
+
+
+def _build_fact_prompt(state: dict, file_content: str) -> str:
+    """Build the system prompt for Fact Type structured-output call."""
+    user_goal = get_approved(state, "user_goal") or {}
+    goal_str = format_user_goal(user_goal)
+    entity_types_str = build_entity_types_context(state)
+
+    from tools.competency_tools import format_competency_questions
+
+    cqs = format_competency_questions(state)
+
+    return f"""\
+You are a knowledge extraction specialist defining relationship templates.
+Analyze the provided text and propose fact types (directed relationship templates)
+between approved entity types.
+
+## User Goal
+{goal_str}
+
+## Competency Questions
+{cqs}
+
+## Approved Entity Types
+Both subject and object MUST be one of these approved types:
+{entity_types_str}
+
+## Design Rules
+- Predicates must be lowercase_with_underscores (e.g., has_issue, supplied_by)
+- Choose the natural reading direction (Customer wrote Review, not Review written_by Customer)
+- No vague predicates (related_to, associated_with, linked_to)
+- No redundant pairs -- pick the most natural direction
+- Every fact type must support the user's stated goal
+
+## File Content
+{file_content}
+
+Return a JSON object with fact_types array and analysis_summary."""
+
+
+@traceable(name="propose_entity_types")
+def propose_entity_types(
+    state: dict, content: str = None, user_message: str = None
+) -> dict:
+    """Propose entity types via a single structured-output Claude API call.
+
+    Args:
+        state: Current pipeline state.
+        content: File content string. If None, uses build_file_content.
+        user_message: Optional user message to include. If None, uses a default.
+
+    Returns:
+        Parsed JSON dict with entity_types and analysis_summary.
+    """
+    if content is None:
+        content, _ = build_file_content(state)
+
+    if user_message is None:
+        user_message = "Analyze the files and propose entity types."
+
+    system_prompt = _build_ner_prompt(state, content)
+    client = wrap_anthropic(anthropic.Anthropic())
+
+    response = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=4096,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_message}],
+        output_config={
+            "format": {
+                "type": "json_schema",
+                "schema": ENTITY_TYPE_JSON_SCHEMA,
+            }
+        },
+        metadata={"user_id": "kg-factory"},
+    )
+
+    # Extract text from response (skip thinking blocks)
+    text = ""
+    for block in response.content:
+        if getattr(block, "type", None) == "text":
+            text = block.text
+            break
+
+    return json.loads(text)
+
+
+@traceable(name="propose_fact_types")
+def propose_fact_types(
+    state: dict, content: str = None, user_message: str = None
+) -> dict:
+    """Propose fact types via a single structured-output Claude API call.
+
+    Args:
+        state: Current pipeline state.
+        content: File content string. If None, uses build_file_content.
+        user_message: Optional user message to include. If None, uses a default.
+
+    Returns:
+        Parsed JSON dict with fact_types and analysis_summary.
+    """
+    if content is None:
+        content, _ = build_file_content(state)
+
+    if user_message is None:
+        user_message = "Analyze the files and propose fact types."
+
+    system_prompt = _build_fact_prompt(state, content)
+    client = wrap_anthropic(anthropic.Anthropic())
+
+    response = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=4096,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_message}],
+        output_config={
+            "format": {
+                "type": "json_schema",
+                "schema": FACT_TYPE_JSON_SCHEMA,
+            }
+        },
+        metadata={"user_id": "kg-factory"},
+    )
+
+    # Extract text from response (skip thinking blocks)
+    text = ""
+    for block in response.content:
+        if getattr(block, "type", None) == "text":
+            text = block.text
+            break
+
+    return json.loads(text)
+
+
+def gather_evidence(state: dict, entity_types: list[dict]) -> list[dict]:
+    """Programmatically gather grounding evidence for discovered entity types.
+
+    For each entity type where source == "discovered", runs handle_search_files
+    for each pattern in evidence_patterns. Populates grounding_evidence with
+    the same structure the critic expects. No LLM calls.
+
+    Args:
+        state: Current pipeline state (needs approved_files).
+        entity_types: List of entity type dicts from propose_entity_types.
+
+    Returns:
+        The same list with grounding_evidence attached to discovered types.
+    """
+    for entity in entity_types:
+        if entity.get("source") != "discovered":
+            continue
+
+        evidence = {
+            "search_patterns": [],
+            "total_mentions": 0,
+            "example_excerpts": [],
+            "files_with_evidence": 0,
+        }
+        files_with_hits: set[str] = set()
+
+        for pattern in entity.get("evidence_patterns", []):
+            result = handle_search_files(state, pattern=pattern)
+            evidence["search_patterns"].append(pattern)
+            evidence["total_mentions"] += result.get("match_count", 0)
+
+            for match in result.get("matches", [])[:2]:
+                evidence["example_excerpts"].append(match["context"])
+                files_with_hits.add(match["file"])
+
+        evidence["files_with_evidence"] = len(files_with_hits)
+        evidence["example_excerpts"] = evidence["example_excerpts"][:5]
+        entity["grounding_evidence"] = evidence
+
+    return entity_types
+
+
+def merge_entity_proposals(proposals: list[dict]) -> dict:
+    """Merge multiple per-file entity type proposals into one.
+
+    Deduplication rules:
+    - Entity types keyed by name
+    - If two files propose the same type, keep the longer description
+    - Combine evidence_patterns (union, deduplicated)
+    - Concatenate analysis_summary strings
+
+    Args:
+        proposals: List of dicts from propose_entity_types (one per file).
+
+    Returns:
+        Single merged dict with entity_types and analysis_summary.
+    """
+    merged_types: dict[str, dict] = {}
+    summaries = []
+
+    for proposal in proposals:
+        summaries.append(proposal.get("analysis_summary", ""))
+        for et in proposal.get("entity_types", []):
+            name = et["name"]
+            if name not in merged_types:
+                merged_types[name] = {
+                    "name": name,
+                    "source": et["source"],
+                    "description": et["description"],
+                    "evidence_patterns": list(et.get("evidence_patterns", [])),
+                }
+            else:
+                existing = merged_types[name]
+                # Keep longer description
+                if len(et["description"]) > len(existing["description"]):
+                    existing["description"] = et["description"]
+                # Union of evidence patterns
+                existing_patterns = set(existing["evidence_patterns"])
+                for p in et.get("evidence_patterns", []):
+                    if p not in existing_patterns:
+                        existing["evidence_patterns"].append(p)
+                        existing_patterns.add(p)
+                # If either says well_known, keep well_known
+                if et["source"] == "well_known":
+                    existing["source"] = "well_known"
+
+    return {
+        "entity_types": list(merged_types.values()),
+        "analysis_summary": "\n\n".join(s for s in summaries if s),
+    }
+
+
+def merge_fact_proposals(proposals: list[dict]) -> dict:
+    """Merge multiple per-file fact type proposals into one.
+
+    Deduplication rules:
+    - Fact types keyed by (subject, predicate, object) triple
+    - First description wins
+    - Concatenate analysis_summary strings
+
+    Args:
+        proposals: List of dicts from propose_fact_types (one per file).
+
+    Returns:
+        Single merged dict with fact_types and analysis_summary.
+    """
+    seen_triples: dict[tuple[str, str, str], dict] = {}
+    summaries = []
+
+    for proposal in proposals:
+        summaries.append(proposal.get("analysis_summary", ""))
+        for ft in proposal.get("fact_types", []):
+            key = (ft["subject"], ft["predicate"], ft["object"])
+            if key not in seen_triples:
+                seen_triples[key] = {
+                    "subject": ft["subject"],
+                    "predicate": ft["predicate"],
+                    "object": ft["object"],
+                    "description": ft["description"],
+                }
+
+    return {
+        "fact_types": list(seen_triples.values()),
+        "analysis_summary": "\n\n".join(s for s in summaries if s),
+    }
+
+
+def _format_entity_proposal_response(
+    result: dict, entity_types_with_evidence: list[dict]
+) -> str:
+    """Format the structured-output result into a readable agent response."""
+    lines = []
+    lines.append("## Entity Type Proposal\n")
+    lines.append(result.get("analysis_summary", ""))
+    lines.append("")
+
+    for et in entity_types_with_evidence:
+        source_tag = "[well-known]" if et["source"] == "well_known" else "[discovered]"
+        lines.append(f"**{et['name']}** {source_tag}")
+        lines.append(f"  {et['description']}")
+
+        evidence = et.get("grounding_evidence")
+        if evidence:
+            mentions = evidence.get("total_mentions", 0)
+            files = evidence.get("files_with_evidence", 0)
+            patterns = evidence.get("search_patterns", [])
+            if mentions == 0:
+                lines.append(
+                    f"  Evidence: [no evidence found] "
+                    f"(searched: {', '.join(patterns)})"
+                )
+            else:
+                lines.append(
+                    f"  Evidence: {mentions} mentions in {files} file(s), "
+                    f"patterns: {', '.join(patterns)}"
+                )
+        lines.append("")
+
+    lines.append(
+        "Would you like to modify this proposal or approve it?"
+    )
+    return "\n".join(lines)
+
+
+def _format_fact_proposal_response(result: dict) -> str:
+    """Format the fact type structured-output result into a readable response."""
+    lines = []
+    lines.append("## Fact Type Proposal\n")
+    lines.append(result.get("analysis_summary", ""))
+    lines.append("")
+
+    for ft in result.get("fact_types", []):
+        lines.append(
+            f"**({ft['subject']})-[{ft['predicate']}]->({ft['object']})**"
+        )
+        lines.append(f"  {ft['description']}")
+        lines.append("")
+
+    lines.append(
+        "Would you like to modify this proposal or approve it?"
+    )
+    return "\n".join(lines)
 
 
 def build_entity_types_context(state: dict) -> str:

@@ -9,6 +9,7 @@ All artifacts are persisted in state (proposed/approved values).
 """
 
 import os
+import re
 import sys
 import threading
 import asyncio
@@ -996,31 +997,102 @@ def kg_critic(scope: str = "structured") -> dict:
     }
 
 
-@mcp.tool
-@mcp_traceable(name="mcp.kg_ner_extraction")
-@_async_capable("kg_ner_extraction")
-def kg_ner_extraction(message: str) -> dict:
-    """Send a message to the NER Extraction Agent.
-
-    The agent analyzes approved markdown files and proposes entity types
-    (categories) to extract. Entity types include well-known types from
-    the construction plan and discovered types from the text.
-
-    Pass the user's message exactly as they wrote it. Multi-turn conversation.
-    Call once per user message. Stages 1-3 must be completed first.
-
-    Args:
-        message: The user's message, passed through exactly as written.
-
-    Returns:
-        Dictionary with agent response, status, and pre-computation summary.
-    """
+def _run_ner_extraction(message: str) -> dict:
+    """Core implementation for kg_ner_extraction (testable without MCP decoration)."""
     guard = _check_project_active()
     if guard:
         return guard
     state = _load_clean_state()
     conversation = _pop_conversation(state, "_ner_extraction_conversation")
+    has_prior_proposal = "proposed_entity_types" in state
 
+    # First call: use structured output (fast path)
+    if conversation is None and not has_prior_proposal:
+        try:
+            from tools.extraction_tools import (
+                build_file_content,
+                propose_entity_types,
+                gather_evidence,
+                merge_entity_proposals,
+                _format_entity_proposal_response,
+            )
+
+            content, fits = build_file_content(state)
+
+            if fits:
+                result = propose_entity_types(
+                    state, content=content, user_message=message
+                )
+            else:
+                # Per-file fallback for large content
+                proposals = []
+                for _path, file_text in content.items():
+                    proposals.append(propose_entity_types(state, content=file_text))
+                result = merge_entity_proposals(proposals)
+
+            # Gather evidence programmatically (no LLM calls)
+            entity_types_with_evidence = gather_evidence(
+                state, result["entity_types"]
+            )
+
+            # Save as proposed (same format as handle_set_proposed_entities)
+            proposed = {}
+            for et in entity_types_with_evidence:
+                entry = {
+                    "source": et["source"],
+                    "description": et["description"],
+                }
+                if "grounding_evidence" in et:
+                    entry["grounding_evidence"] = et["grounding_evidence"]
+                proposed[et["name"]] = entry
+            state["proposed_entity_types"] = proposed
+
+            response = _format_entity_proposal_response(
+                result, entity_types_with_evidence
+            )
+
+            # Seed conversation so agent loop has context on follow-up calls
+            seed = [
+                {"role": "user", "content": message},
+                {"role": "assistant", "content": response},
+            ]
+            _store_conversation(state, "_ner_extraction_conversation", seed)
+
+            _save_state(state)
+
+            # Build status
+            status = {
+                "has_proposed_entities": True,
+                "has_approved_entities": "approved_entity_types" in state,
+                "proposed_entities": proposed,
+                "entity_count": len(proposed),
+                "mode": "structured_output",
+            }
+            unstructured = state.get("approved_files", {}).get("unstructured", [])
+            construction_plan = state.get("approved_construction_plan", {})
+            well_known = [
+                entry["label"]
+                for entry in construction_plan.values()
+                if entry.get("construction_type") == "node"
+            ]
+            status["pre_computation_summary"] = {
+                "files_analyzed": len(unstructured),
+                "file_names": [f["path"] for f in unstructured],
+                "well_known_types": well_known,
+            }
+            return {"agent_response": response, "status": status}
+
+        except Exception as exc:
+            # Fallback to agent loop on error
+            import logging
+            logging.getLogger(__name__).warning(
+                "Structured output failed, falling back to agent loop: %s", exc
+            )
+            # Re-load state (may have been partially modified)
+            state = _load_clean_state()
+            conversation = None
+
+    # Iteration path: existing agent loop
     agent = NerExtractionAgent()
     response, state, conversation = agent.run(message, state, conversation)
 
@@ -1062,17 +1134,17 @@ def kg_ner_extraction(message: str) -> dict:
 
 
 @mcp.tool
-@mcp_traceable(name="mcp.kg_fact_extraction")
-@_async_capable("kg_fact_extraction")
-def kg_fact_extraction(message: str) -> dict:
-    """Send a message to the Fact Extraction Agent.
+@mcp_traceable(name="mcp.kg_ner_extraction")
+@_async_capable("kg_ner_extraction")
+def kg_ner_extraction(message: str) -> dict:
+    """Send a message to the NER Extraction Agent.
 
-    The agent analyzes approved markdown files and proposes fact types
-    (relationship templates) between approved entity types. Fact types
-    define directed relationships like (Product)-[has_issue]->(Issue).
+    The agent analyzes approved markdown files and proposes entity types
+    (categories) to extract. Entity types include well-known types from
+    the construction plan and discovered types from the text.
 
     Pass the user's message exactly as they wrote it. Multi-turn conversation.
-    Call once per user message. Stages 1-4 must be completed first.
+    Call once per user message. Stages 1-3 must be completed first.
 
     Args:
         message: The user's message, passed through exactly as written.
@@ -1080,12 +1152,101 @@ def kg_fact_extraction(message: str) -> dict:
     Returns:
         Dictionary with agent response, status, and pre-computation summary.
     """
+    return _run_ner_extraction(message)
+
+
+def _run_fact_extraction(message: str) -> dict:
+    """Core implementation for kg_fact_extraction (testable without MCP decoration)."""
     guard = _check_project_active()
     if guard:
         return guard
     state = _load_clean_state()
     conversation = _pop_conversation(state, "_fact_extraction_conversation")
+    has_prior_proposal = "proposed_fact_types" in state
 
+    # First call: use structured output (fast path)
+    if conversation is None and not has_prior_proposal:
+        try:
+            from tools.extraction_tools import (
+                build_file_content,
+                propose_fact_types,
+                merge_fact_proposals,
+                _format_fact_proposal_response,
+            )
+
+            content, fits = build_file_content(state)
+
+            if fits:
+                result = propose_fact_types(
+                    state, content=content, user_message=message
+                )
+            else:
+                # Per-file fallback for large content
+                proposals = []
+                for _path, file_text in content.items():
+                    proposals.append(propose_fact_types(state, content=file_text))
+                result = merge_fact_proposals(proposals)
+
+            # Validate subject/object against approved entity types
+            approved_entities = state.get("approved_entity_types", {})
+            valid_facts = {}
+            for ft in result.get("fact_types", []):
+                subj = ft["subject"]
+                obj = ft["object"]
+                pred = ft["predicate"]
+                # Skip if subject or object not in approved entities
+                if subj not in approved_entities or obj not in approved_entities:
+                    continue
+                # Skip if predicate format is invalid
+                if not re.match(r"^[a-z][a-z0-9_]*$", pred):
+                    continue
+                valid_facts[pred] = {
+                    "subject_label": subj,
+                    "predicate_label": pred,
+                    "object_label": obj,
+                    "description": ft.get("description", ""),
+                }
+
+            state["proposed_fact_types"] = valid_facts
+
+            response = _format_fact_proposal_response(result)
+
+            # Seed conversation so agent loop has context on follow-up calls
+            seed = [
+                {"role": "user", "content": message},
+                {"role": "assistant", "content": response},
+            ]
+            _store_conversation(state, "_fact_extraction_conversation", seed)
+
+            _save_state(state)
+
+            # Build status
+            entity_types = state.get("approved_entity_types", {})
+            unstructured = state.get("approved_files", {}).get("unstructured", [])
+            status = {
+                "has_proposed_facts": True,
+                "has_approved_facts": "approved_fact_types" in state,
+                "proposed_facts": valid_facts,
+                "fact_count": len(valid_facts),
+                "mode": "structured_output",
+                "pre_computation_summary": {
+                    "files_analyzed": len(unstructured),
+                    "file_names": [f["path"] for f in unstructured],
+                    "entity_types_available": sorted(entity_types.keys()),
+                },
+            }
+            return {"agent_response": response, "status": status}
+
+        except Exception as exc:
+            # Fallback to agent loop on error
+            import logging
+            logging.getLogger(__name__).warning(
+                "Structured output failed, falling back to agent loop: %s", exc
+            )
+            state = _load_clean_state()
+            conversation = None
+
+    # Iteration path: existing agent loop
     agent = FactExtractionAgent()
     response, state, conversation = agent.run(message, state, conversation)
 
@@ -1119,6 +1280,28 @@ def kg_fact_extraction(message: str) -> dict:
         "agent_response": response,
         "status": status,
     }
+
+
+@mcp.tool
+@mcp_traceable(name="mcp.kg_fact_extraction")
+@_async_capable("kg_fact_extraction")
+def kg_fact_extraction(message: str) -> dict:
+    """Send a message to the Fact Extraction Agent.
+
+    The agent analyzes approved markdown files and proposes fact types
+    (relationship templates) between approved entity types. Fact types
+    define directed relationships like (Product)-[has_issue]->(Issue).
+
+    Pass the user's message exactly as they wrote it. Multi-turn conversation.
+    Call once per user message. Stages 1-4 must be completed first.
+
+    Args:
+        message: The user's message, passed through exactly as written.
+
+    Returns:
+        Dictionary with agent response, status, and pre-computation summary.
+    """
+    return _run_fact_extraction(message)
 
 
 def _format_node_results(nodes: list[dict]) -> str:
