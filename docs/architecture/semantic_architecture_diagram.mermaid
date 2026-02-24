@@ -1,0 +1,126 @@
+graph TB
+    subgraph Layer5["Layer 5: LLM Agent and Retrieval Planner"]
+        QD["Query Decomposer"]
+        RO["Retrieval Orchestrator"]
+        EXEC["Retrieval Execution"]
+        RV["Result Validator"]
+        LLM["LLM Reasoning Engine"]
+        
+        QD --> RO
+        RO --> EXEC
+        EXEC --> RV
+        RV --> LLM
+    end
+
+    subgraph Layer4["Layer 4: Retrieval Strategy Metadata"]
+        VA["Vector Annotations"]
+        EA["Exact-Match Annotations"]
+        TA["Traversal Annotations"]
+        FTA["Full-Text Annotations"]
+    end
+
+    subgraph Layer3["Layer 3: Semantic Enrichment"]
+        SCHEMA["Schema.org Mappings"]
+        GR["GoodRelations Mappings"]
+        FIBO["FIBO Mappings"]
+        DC["Dublin Core Mappings"]
+        CUSTOM["Custom Namespace"]
+        LOV["LOV API Search"]
+        ENRICH["Enrichment Agent"]
+        
+        LOV --> ENRICH
+        ENRICH --> SCHEMA
+        ENRICH --> GR
+        ENRICH --> FIBO
+        ENRICH --> DC
+        ENRICH --> CUSTOM
+    end
+
+    subgraph Layer2["Layer 2: SHACL Shape Definitions"]
+        SHAPES["Domain-Partitioned SHACL Shapes"]
+        DOM_A["Domain A Shapes"]
+        DOM_B["Domain B Shapes"]
+        DOM_C["Domain C Shapes"]
+        
+        SHAPES --- DOM_A
+        SHAPES --- DOM_B
+        SHAPES --- DOM_C
+    end
+
+    subgraph Layer1["Layer 1: Neo4j Property Graph"]
+        NEO4J[("Neo4j Database")]
+        CYPHER["Cypher Engine"]
+        VECTOR["Vector Index"]
+        FULLTEXT["Full-Text Index"]
+        GDS["Graph Data Science"]
+        
+        NEO4J --- CYPHER
+        NEO4J --- VECTOR
+        NEO4J --- FULLTEXT
+        NEO4J --- GDS
+    end
+
+    subgraph Bridge["Bridge Layer"]
+        N10S["Neosemantics n10s"]
+    end
+
+    subgraph Tools["Python Orchestration"]
+        RDFLIB["RDFLib"]
+        PYSHACL["pySHACL"]
+        INTRO["Introspection Script"]
+        CLASS["Classification Script"]
+    end
+
+    QD --> SHAPES
+    QD --> VA
+    QD --> EA
+    QD --> TA
+    QD --> FTA
+    EXEC --> CYPHER
+    EXEC --> VECTOR
+    EXEC --> FULLTEXT
+    RV --> PYSHACL
+
+    N10S <--> NEO4J
+    N10S <--> PYSHACL
+    N10S --> SCHEMA
+    N10S --> GR
+    N10S --> FIBO
+    N10S --> DC
+    N10S --> CUSTOM
+
+    INTRO --> NEO4J
+    INTRO --> SHAPES
+    GDS --> SHAPES
+    RDFLIB --> SHAPES
+    CLASS --> NEO4J
+    CLASS --> VA
+    CLASS --> EA
+    CLASS --> TA
+    CLASS --> FTA
+
+    SCHEMA --> SHAPES
+    GR --> SHAPES
+    FIBO --> SHAPES
+    DC --> SHAPES
+    CUSTOM --> SHAPES
+    VA --> SHAPES
+    EA --> SHAPES
+    TA --> SHAPES
+    FTA --> SHAPES
+
+    classDef layer5 fill:#4A90D9,stroke:#2C5F8A,color:#fff
+    classDef layer4 fill:#7B68EE,stroke:#5A4CB5,color:#fff
+    classDef layer3 fill:#50C878,stroke:#3A9158,color:#fff
+    classDef layer2 fill:#FFB347,stroke:#CC8E38,color:#333
+    classDef layer1 fill:#FF6B6B,stroke:#CC5555,color:#fff
+    classDef bridge fill:#DDA0DD,stroke:#AA7DAA,color:#333
+    classDef tools fill:#87CEEB,stroke:#6AA3BC,color:#333
+
+    class QD,RO,RV,LLM,EXEC layer5
+    class VA,EA,TA,FTA layer4
+    class SCHEMA,GR,FIBO,DC,CUSTOM,LOV,ENRICH layer3
+    class SHAPES,DOM_A,DOM_B,DOM_C layer2
+    class NEO4J,CYPHER,VECTOR,FULLTEXT,GDS layer1
+    class N10S bridge
+    class RDFLIB,PYSHACL,INTRO,CLASS tools

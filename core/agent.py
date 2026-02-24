@@ -9,6 +9,7 @@ from typing import Callable
 
 import anthropic
 
+from .config import CLAUDE_MODEL
 from .tools import execute_tool, format_tool_result, format_tool_error
 from .tracing import wrap_anthropic
 
@@ -20,7 +21,7 @@ async def run_agent(
     tools: list[dict],
     tool_handlers: dict[str, Callable],
     conversation: list[dict] | None = None,
-    model: str = "claude-sonnet-4-20250514",
+    model: str = CLAUDE_MODEL,
     max_tokens: int = 4096
 ) -> tuple[str, dict, list[dict]]:
     """Run an agent conversation turn.
@@ -128,7 +129,7 @@ def run_agent_sync(
     tools: list[dict],
     tool_handlers: dict[str, Callable],
     conversation: list[dict] | None = None,
-    model: str = "claude-sonnet-4-20250514",
+    model: str = CLAUDE_MODEL,
     max_tokens: int = 4096,
     max_turns: int = 50
 ) -> tuple[str, dict, list[dict]]:

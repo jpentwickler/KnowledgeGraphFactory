@@ -186,7 +186,7 @@ def correlate_subject_and_domain_nodes(
             f"""
             MATCH (entity:{label}:`__Entity__`), (domain:{label})
             WHERE NOT domain:`__Entity__`
-              AND apoc.text.jaroWinklerDistance(entity[$entityKey], domain[$domainKey]) < $distance
+              AND apoc.text.jaroWinklerDistance(toLower(toString(entity[$entityKey])), toLower(toString(domain[$domainKey]))) < $distance
             MERGE (entity)-[r:CORRESPONDS_TO]->(domain)
             ON CREATE SET r.created_at = datetime()
             ON MATCH SET r.updated_at = datetime()
@@ -205,6 +205,119 @@ def correlate_subject_and_domain_nodes(
         "label": label,
         "relationships_created": count,
     }
+
+
+def find_candidate_matches(
+    driver: Driver,
+    label: str,
+    entity_key: str,
+    domain_key: str,
+    min_distance: float = 0.1,
+    max_distance: float = 0.5,
+) -> list[dict]:
+    """Find borderline entity-domain matches without creating relationships.
+
+    Queries for pairs where Jaro-Winkler distance is between min_distance
+    (auto-resolve threshold) and max_distance (upper bound for candidates).
+    These are "close but not confident" matches for human review.
+
+    Args:
+        driver: Neo4j driver instance.
+        label: Shared label between entity and domain nodes.
+        entity_key: Property key on entity nodes.
+        domain_key: Property key on domain nodes.
+        min_distance: Lower bound (exclusive) — matches below this are auto-resolved.
+        max_distance: Upper bound (inclusive) — matches above this are too distant.
+
+    Returns:
+        List of dicts with entity_name, domain_name, domain_id, distance, label.
+    """
+    with driver.session() as session:
+        result = session.run(
+            f"""
+            MATCH (entity:{label}:`__Entity__`), (domain:{label})
+            WHERE NOT domain:`__Entity__`
+              AND NOT (entity)-[:CORRESPONDS_TO]->(domain)
+            WITH entity, domain,
+                 apoc.text.jaroWinklerDistance(
+                     toLower(toString(entity[$entityKey])),
+                     toLower(toString(domain[$domainKey]))
+                 ) AS dist
+            WHERE dist >= $minDistance AND dist <= $maxDistance
+            RETURN entity[$entityKey] AS entity_name,
+                   domain[$domainKey] AS domain_name,
+                   dist AS distance
+            ORDER BY dist ASC
+            """,
+            {
+                "entityKey": entity_key,
+                "domainKey": domain_key,
+                "minDistance": min_distance,
+                "maxDistance": max_distance,
+            },
+        )
+        candidates = []
+        for record in result:
+            candidates.append(
+                {
+                    "entity_name": record["entity_name"],
+                    "domain_name": record["domain_name"],
+                    "distance": record["distance"],
+                    "label": label,
+                    "entity_key": entity_key,
+                    "domain_key": domain_key,
+                }
+            )
+        return candidates
+
+
+def create_correspondences_for_candidates(
+    driver: Driver,
+    label: str,
+    entity_key: str,
+    domain_key: str,
+    approved_pairs: list[dict],
+) -> int:
+    """Create CORRESPONDS_TO links for specific human-approved candidate pairs.
+
+    Uses exact matching (not fuzzy) so only the specific approved pairs
+    get linked.
+
+    Args:
+        driver: Neo4j driver instance.
+        label: Shared label between entity and domain nodes.
+        entity_key: Property key on entity nodes.
+        domain_key: Property key on domain nodes.
+        approved_pairs: List of dicts with "entity_name" and "domain_name" keys.
+
+    Returns:
+        Number of relationships created.
+    """
+    total_created = 0
+    with driver.session() as session:
+        for pair in approved_pairs:
+            result = session.run(
+                f"""
+                MATCH (entity:{label}:`__Entity__`), (domain:{label})
+                WHERE NOT domain:`__Entity__`
+                  AND toLower(toString(entity[$entityKey])) = toLower(toString($entityName))
+                  AND toLower(toString(domain[$domainKey])) = toLower(toString($domainName))
+                MERGE (entity)-[r:CORRESPONDS_TO]->(domain)
+                ON CREATE SET r.created_at = datetime(), r.source = 'human_approved'
+                ON MATCH SET r.updated_at = datetime()
+                RETURN count(r) as relationshipCount
+                """,
+                {
+                    "entityKey": entity_key,
+                    "domainKey": domain_key,
+                    "entityName": pair["entity_name"],
+                    "domainName": pair["domain_name"],
+                },
+            )
+            record = result.single()
+            if record:
+                total_created += record["relationshipCount"]
+    return total_created
 
 
 @traceable(name="pipeline.resolve_entities")
@@ -229,6 +342,7 @@ def resolve_entities(state: dict, driver: Driver) -> dict:
         "labels_resolved": [],
         "per_label_results": [],
         "total_correspondences": 0,
+        "candidates": [],
     }
 
     print("\n[Entity Resolution] Finding entity labels in subject graph...")
@@ -269,7 +383,7 @@ def resolve_entities(state: dict, driver: Driver) -> dict:
             )
             continue
 
-        # Correlate keys
+        # Pre-filter keys by name similarity to avoid expensive Cypher cross-joins
         correlated = correlate_entity_and_domain_keys(
             label, entity_keys, domain_keys, similarity=0.5
         )
@@ -302,16 +416,29 @@ def resolve_entities(state: dict, driver: Driver) -> dict:
             count = resolution["relationships_created"]
             print(f"    Created {count} CORRESPONDS_TO relationships")
 
-            results["labels_resolved"].append(label)
+            if count > 0:
+                results["labels_resolved"].append(label)
             results["total_correspondences"] += count
+
+            # Find borderline candidates for human review
+            label_candidates = find_candidate_matches(
+                driver, label, best_entity_key, best_domain_key
+            )
+            if label_candidates:
+                print(
+                    f"    Found {len(label_candidates)} candidate matches for review"
+                )
+                results["candidates"].extend(label_candidates)
+
             results["per_label_results"].append(
                 {
                     "label": label,
-                    "status": "resolved",
+                    "status": "resolved" if count > 0 else "no_matches",
                     "entity_key": best_entity_key,
                     "domain_key": best_domain_key,
                     "key_similarity": best_score,
                     "relationships_created": count,
+                    "candidates": label_candidates,
                 }
             )
         except Exception as exc:
@@ -339,5 +466,9 @@ def resolve_entities(state: dict, driver: Driver) -> dict:
         "labels_resolved": results["labels_resolved"],
         "total_correspondences": results["total_correspondences"],
     }
+
+    # Store candidates for human review (persists across calls)
+    if results["candidates"]:
+        state["proposed_resolution_candidates"] = results["candidates"]
 
     return results

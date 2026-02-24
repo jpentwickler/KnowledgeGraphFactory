@@ -1,0 +1,75 @@
+{
+  "timestamp": "2026-02-22T21:07:58.047452+00:00",
+  "models": {
+    "agent": "claude-sonnet-4-20250514",
+    "structured": "claude-sonnet-4-6"
+  },
+  "metrics": {
+    "required_entity_recall": 0.5,
+    "entity_precision": 0.6,
+    "grounding_rate": 1.0,
+    "zero_evidence_count": 0,
+    "required_fact_recall": 0.3333,
+    "bonus_entity_recall": 0.0,
+    "evidence_depth": 30.7
+  },
+  "proposed_entities": [
+    {
+      "name": "Product",
+      "source": "well_known"
+    },
+    {
+      "name": "Review",
+      "source": "discovered"
+    },
+    {
+      "name": "Reviewer",
+      "source": "discovered"
+    },
+    {
+      "name": "DefectReport",
+      "source": "discovered"
+    },
+    {
+      "name": "Part",
+      "source": "well_known"
+    }
+  ],
+  "proposed_facts": [
+    {
+      "subject": "Reviewer",
+      "predicate": "authored",
+      "object": "Review"
+    },
+    {
+      "subject": "Review",
+      "predicate": "evaluates",
+      "object": "Product"
+    },
+    {
+      "subject": "Review",
+      "predicate": "contains",
+      "object": "DefectReport"
+    },
+    {
+      "subject": "DefectReport",
+      "predicate": "affects",
+      "object": "Part"
+    },
+    {
+      "subject": "DefectReport",
+      "predicate": "concerns",
+      "object": "Product"
+    },
+    {
+      "subject": "Part",
+      "predicate": "belongs_to",
+      "object": "Product"
+    },
+    {
+      "subject": "Reviewer",
+      "predicate": "reviewed",
+      "object": "Product"
+    }
+  ]
+}

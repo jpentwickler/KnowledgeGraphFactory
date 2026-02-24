@@ -1614,20 +1614,38 @@ async def _build_unstructured(state, driver, message):
 
 
 @mcp_traceable(name="mcp._build_resolve")
-def _build_resolve(state, driver):
+def _build_resolve(state, driver, message=""):
     """Run entity resolution to link subject graph to domain graph.
+
+    Supports two modes:
+    - Initial run: auto-resolves confident matches, displays candidates for review
+    - Approval: creates links for human-approved candidates
+
+    Args:
+        state: Pipeline state dict.
+        driver: Neo4j driver instance.
+        message: Controls behavior — empty/"resolve" for initial run,
+                 "approve all"/"approve 1,2,3"/"skip"/"reject" for candidate review.
 
     Returns:
         dict with agent_response and status.
     """
+    msg_lower = message.strip().lower()
+
+    # --- Approval mode: handle previously proposed candidates ---
+    if msg_lower.startswith("approve") or msg_lower in ("reject", "skip"):
+        return _handle_candidate_approval(state, driver, msg_lower)
+
+    # --- Initial run: auto-resolve + discover candidates ---
     from pipelines import resolve_entities
 
     results = resolve_entities(state, driver)
-    _save_state(state)  # Persist text_graph_progress.entity_resolution
+    _save_state(state)  # Persist text_graph_progress + proposed_resolution_candidates
 
     labels_checked = results["labels_checked"]
     labels_resolved = results["labels_resolved"]
     total = results["total_correspondences"]
+    candidates = results.get("candidates", [])
 
     if not labels_checked:
         return {
@@ -1639,25 +1657,33 @@ def _build_resolve(state, driver):
         }
 
     lines = ["Entity resolution complete!\n"]
-    lines.append(f"Labels checked: {', '.join(labels_checked)}")
-    if labels_resolved:
-        lines.append(f"Labels resolved: {', '.join(labels_resolved)}")
-    lines.append(f"Total CORRESPONDS_TO relationships: {total}")
 
-    lines.append("\nPer-label results:")
+    # Auto-resolved summary
+    lines.append("Auto-resolved:")
     for result in results["per_label_results"]:
         label = result["label"]
         status = result["status"]
         if status == "resolved":
             lines.append(
-                f"  [OK] {label}: {result['entity_key']} <-> {result['domain_key']} "
-                f"(similarity {result['key_similarity']:.2f}), "
+                f"  [OK] {label}: {result['entity_key']} <-> {result['domain_key']}, "
                 f"{result['relationships_created']} correspondences"
             )
         elif status == "error":
             lines.append(f"  [FAIL] {label}: {result['error']}")
         else:
             lines.append(f"  [SKIP] {label}: {result.get('message', status)}")
+
+    lines.append(f"\nTotal CORRESPONDS_TO relationships: {total}")
+
+    # Candidate summary
+    if candidates:
+        lines.append(f"\nCandidates requiring approval ({len(candidates)}):")
+        for i, c in enumerate(candidates, 1):
+            lines.append(
+                f'  [{i}] "{c["entity_name"]}" -> "{c["domain_name"]}" '
+                f'({c["label"]}, distance: {c["distance"]:.3f})'
+            )
+        lines.append('\nReply with: "approve all", "approve 1,2", or "skip"')
 
     return {
         "agent_response": "\n".join(lines),
@@ -1667,6 +1693,107 @@ def _build_resolve(state, driver):
             "labels_resolved": labels_resolved,
             "total_correspondences": total,
             "per_label_results": results["per_label_results"],
+            "candidates_count": len(candidates),
+        },
+    }
+
+
+def _handle_candidate_approval(state, driver, msg_lower):
+    """Process human approval/rejection of resolution candidates.
+
+    Args:
+        state: Pipeline state dict.
+        driver: Neo4j driver instance.
+        msg_lower: Lowercased message string.
+
+    Returns:
+        dict with agent_response and status.
+    """
+    from pipelines import create_correspondences_for_candidates
+
+    candidates = state.get("proposed_resolution_candidates", [])
+    if not candidates:
+        return {
+            "agent_response": (
+                "No pending resolution candidates to approve.\n\n"
+                "Run entity resolution first with scope='resolve'."
+            ),
+            "status": {"success": False, "error": "no_candidates"},
+        }
+
+    # Reject / skip — clear candidates without creating links
+    if msg_lower in ("reject", "skip"):
+        state.pop("proposed_resolution_candidates", None)
+        _save_state(state)
+        return {
+            "agent_response": (
+                f"Skipped {len(candidates)} candidate(s). "
+                "No additional links created."
+            ),
+            "status": {"success": True, "action": "skipped", "count": 0},
+        }
+
+    # Determine which candidates are approved
+    if msg_lower == "approve all":
+        approved = candidates
+    else:
+        # Parse "approve 1,2,3" or "approve 1, 3, 5"
+        index_str = msg_lower.replace("approve", "").strip()
+        try:
+            indices = [int(x.strip()) for x in index_str.split(",") if x.strip()]
+        except ValueError:
+            return {
+                "agent_response": (
+                    f"Could not parse indices from: '{msg_lower}'\n\n"
+                    'Expected: "approve all", "approve 1,2,3", or "skip"'
+                ),
+                "status": {"success": False, "error": "parse_error"},
+            }
+        # Validate indices (1-based)
+        invalid = [i for i in indices if i < 1 or i > len(candidates)]
+        if invalid:
+            return {
+                "agent_response": (
+                    f"Invalid indices: {invalid}. "
+                    f"Valid range: 1-{len(candidates)}."
+                ),
+                "status": {"success": False, "error": "invalid_indices"},
+            }
+        approved = [candidates[i - 1] for i in indices]
+
+    # Group approved candidates by (label, entity_key, domain_key)
+    groups = {}
+    for c in approved:
+        key = (c["label"], c["entity_key"], c["domain_key"])
+        groups.setdefault(key, []).append(c)
+
+    total_created = 0
+    lines = ["Approved candidates linked!\n"]
+
+    for (label, entity_key, domain_key), pairs in groups.items():
+        count = create_correspondences_for_candidates(
+            driver, label, entity_key, domain_key, pairs
+        )
+        total_created += count
+        for p in pairs:
+            lines.append(
+                f'  [OK] {label}: "{p["entity_name"]}" -> "{p["domain_name"]}"'
+            )
+
+    lines.append(f"\nTotal new CORRESPONDS_TO relationships: {total_created}")
+
+    # Move from proposed to approved
+    state["approved_resolution_candidates"] = approved
+    state.pop("proposed_resolution_candidates", None)
+    _save_state(state)
+
+    return {
+        "agent_response": "\n".join(lines),
+        "status": {
+            "success": True,
+            "action": "approved",
+            "count": total_created,
+            "approved_pairs": len(approved),
         },
     }
 
@@ -1757,7 +1884,7 @@ async def kg_build_graph(message: str = "build", scope: str = "structured") -> d
             result = await _build_unstructured(state, driver, message)
 
         elif scope == "resolve":
-            result = _build_resolve(state, driver)
+            result = _build_resolve(state, driver, message)
 
         elif scope == "all":
             # Run all three phases in sequence
@@ -2041,6 +2168,7 @@ Rules for Cypher queries:
 - Must contain: MATCH or RETURN
 - Use only the node labels and relationship types listed in the schema above
 - Use property names as they appear in the schema
+- If the question requires data from both domain and text layers, classify as "cross_layer"
 
 Respond with JSON only (no markdown):
 {{

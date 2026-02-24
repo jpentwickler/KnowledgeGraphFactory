@@ -8,7 +8,11 @@ from .domain_builder import (
     import_relationships,
     verify_import,
 )
-from .entity_resolution import resolve_entities
+from .entity_resolution import (
+    resolve_entities,
+    find_candidate_matches,
+    create_correspondences_for_candidates,
+)
 from .text_builder import (
     build_entity_schema,
     build_text_graph,
@@ -32,4 +36,6 @@ __all__ = [
     "ParagraphSplitter",
     "RegexTextSplitter",
     "resolve_entities",
+    "find_candidate_matches",
+    "create_correspondences_for_candidates",
 ]

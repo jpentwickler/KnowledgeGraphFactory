@@ -16,6 +16,8 @@ from typing import Any
 import neo4j
 from neo4j import Driver
 
+from core.config import CLAUDE_MODEL
+
 from tools.query_tools import (
     _get_domain_labels,
     _get_domain_node_properties,
@@ -173,6 +175,7 @@ Available strategies:
    - CRITICAL: Only suggest Cypher if you can generate a SAFE, READ-ONLY query
    - Blocked keywords: CREATE, DELETE, SET, REMOVE, MERGE
    - Required keywords: MATCH or RETURN
+   - Do NOT use cypher when the question spans both domain and text layers — use cross_layer instead
 
 3. **vector**: Semantic similarity search on text chunks
    - Use when: Question is about content/meaning in unstructured text
@@ -183,6 +186,7 @@ Available strategies:
    - Requires: Text layer available
 
 5. **cross_layer**: Hybrid search (vector + fulltext) + entity traversal across layers
+   - This is the ONLY strategy that can bridge domain and text layers
    - Use when: Question links text content to structured domain entities, or asks about
      extracted entities (customers, quality issues, product features) alongside domain data
    - ALSO use when: Question contains specific names, @mentions, or keywords that need
@@ -214,7 +218,7 @@ Respond with JSON only (no markdown):
         client = wrap_anthropic(anthropic.Anthropic())
 
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=CLAUDE_MODEL,
             max_tokens=1024,
             system=system_prompt,
             messages=[{"role": "user", "content": user_message}]
@@ -292,6 +296,15 @@ def _execute_schema_query(driver: Driver, state: dict) -> dict:
             count_result = session.run(f"MATCH (n:`{label}`) RETURN count(n) AS count")
             counts[label] = count_result.single()["count"]
 
+        # Get property keys per label (sample one node)
+        properties = {}
+        for label in all_labels:
+            prop_result = session.run(
+                f"MATCH (n:`{label}`) RETURN keys(n) AS props LIMIT 1"
+            )
+            record = prop_result.single()
+            properties[label] = sorted(record["props"]) if record else []
+
     # Classify labels
     domain_found = [l for l in all_labels if l in domain_labels]
     text_found = [l for l in all_labels if l in text_labels]
@@ -303,19 +316,22 @@ def _execute_schema_query(driver: Driver, state: dict) -> dict:
     if domain_found:
         lines.append("## Domain Layer (from structured data)")
         for label in domain_found:
-            lines.append(f"  - {label}: {counts[label]:,} nodes")
+            props = properties.get(label, [])
+            lines.append(f"  - {label}: {counts[label]:,} nodes {props}")
         lines.append("")
 
     if text_found:
         lines.append("## Text Layer (from unstructured data)")
         for label in text_found:
-            lines.append(f"  - {label}: {counts[label]:,} nodes")
+            props = properties.get(label, [])
+            lines.append(f"  - {label}: {counts[label]:,} nodes {props}")
         lines.append("")
 
     if other:
         lines.append("## Other Labels")
         for label in other:
-            lines.append(f"  - {label}: {counts[label]:,} nodes")
+            props = properties.get(label, [])
+            lines.append(f"  - {label}: {counts[label]:,} nodes {props}")
         lines.append("")
 
     if all_rels:
@@ -332,7 +348,8 @@ def _execute_schema_query(driver: Driver, state: dict) -> dict:
             "domain_labels": domain_found,
             "text_labels": text_found,
             "relationships": all_rels,
-            "node_counts": counts
+            "node_counts": counts,
+            "properties": properties
         }
     ]
 

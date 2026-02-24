@@ -99,3 +99,12 @@ All user stories must meet these criteria before being considered complete:
 | [US009](US009_text_graph_builder.md) | Text Graph Builder | 8 | Not Started |
 | [US010](US010_adaptive_markdown_splitting.md) | Adaptive Markdown Splitting | 3 | Not Started |
 | [US011](US011_langsmith_observability.md) | LangSmith Observability | 3 | Not Started |
+| [US012](US012_competency_questions.md) | Competency Questions | 3 | Not Started |
+| [US013](US013_kg_query.md) | KG Query Infrastructure | 5 | Not Started |
+| [US014](US014_cq_evaluation.md) | CQ Evaluation | 5 | Not Started |
+| [US015](US015_query_agent_openclaw.md) | Query Agent & Platform Integration | 13 | Not Started |
+| [US017](US017_mermaid_diagram.md) | Mermaid Diagram Generation | 3 | Not Started |
+| [US018](US018_project_management.md) | Project Management | 5 | Not Started |
+| [US020](US020_extraction_efficiency.md) | Extraction Efficiency | 5 | Not Started |
+| [US021](US021_remote_query_server.md) | Remote Query Server | 5 | Not Started |
+| [US022](US022_plugin_distribution.md) | Plug-and-Play Plugin Distribution | 3 | Not Started |

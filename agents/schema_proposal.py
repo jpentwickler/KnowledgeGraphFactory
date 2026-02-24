@@ -37,7 +37,8 @@ USER GOAL:
 - Kind: {user_goal_kind}
 - Description: {user_goal_description}
 
-COMPETENCY QUESTIONS (the graph schema must support answering these):
+COMPETENCY QUESTIONS (for context -- focus on questions answerable from the structured data above; \
+questions that require unstructured text analysis are handled by later pipeline stages):
 {competency_questions}
 
 APPROVED FILE DATA:
@@ -183,7 +184,7 @@ class SchemaProposalAgent:
         user_goal_description = user_goal.get("graph_description", "No description available.")
 
         # Pre-compute file context and competency questions
-        file_context = build_file_context(state) or "No approved files found."
+        file_context = build_file_context(state, scope="structured") or "No approved files found."
         competency_questions = format_competency_questions(state)
 
         system_prompt = SYSTEM_PROMPT_TEMPLATE.format(

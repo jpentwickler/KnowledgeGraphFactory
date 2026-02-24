@@ -48,8 +48,8 @@ Criticize the proposed schema for relevance and correctness:
 - Are unique identifiers actually unique? Check the sample data above for duplicates.
 - Could any nodes be relationships instead? Double-check that unique identifiers are \
 unique and not references to other nodes.
-- Can you manually trace through the source data to find the necessary information for \
-answering a hypothetical question?
+- Can you trace sample rows through the proposed nodes and relationships to verify \
+the data flow is correct?
 - Is every node in the schema connected? What relationships could be missing? \
 Every node should connect to at least one other node.
 - Are hierarchical container relationships missing?
@@ -66,9 +66,11 @@ INSTRUCTIONS:
 Analyze the construction plan against the file data above. You have all the context \
 you need -- do NOT ask for more information.
 
-You are validating ONLY the structured data construction plan. Unstructured files \
-(markdown) are handled by separate NER and Fact Extraction stages -- do NOT flag \
-their absence from the plan.
+You are validating ONLY the structured data construction plan (CSV files). \
+The user goal may describe a broader knowledge graph that includes unstructured \
+text sources. Your validation scope is LIMITED to the CSV data shown above. \
+Do NOT flag coverage gaps for information that would come from unstructured files \
+-- those are handled by separate NER and Fact Extraction pipeline stages.
 
 After completing your analysis, you MUST call the 'submit_review' tool:
 - If the schema is correct, call submit_review with verdict "valid" and an empty \

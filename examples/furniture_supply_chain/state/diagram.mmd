@@ -1,32 +1,35 @@
 graph LR
   subgraph Domain["Domain Layer"]
-    Part["Part (88)"]
+    Part["Part (92)"]
+    Review["Review (70)"]
     Assembly["Assembly (64)"]
-    AssemblyExperience["AssemblyExperience (50)"]
-    QualityIssue["QualityIssue (45)"]
-    Customer["Customer (40)"]
-    Supplier["Supplier (20)"]
+    Reviewer["Reviewer (33)"]
+    Defect["Defect (29)"]
+    Supplier["Supplier (22)"]
     Product["Product (20)"]
-    ProductFeature["ProductFeature (18)"]
   end
   subgraph Text["Text Layer"]
-    KGBuilder["__KGBuilder__ (243)"]
-    Entity["__Entity__ (163)"]
+    KGBuilder["__KGBuilder__ (228)"]
+    Entity["__Entity__ (148)"]
     Chunk["Chunk (70)"]
     Document["Document (10)"]
   end
-  Supplier -- "SUPPLIES_PART (176)" --> Part
-  Assembly -- "HAS_PART (88)" --> Part
+  Supplier -- "SUPPLIES (176)" --> Part
+  Assembly -- "CONTAINS_PART (88)" --> Part
   Chunk -. "FROM_DOCUMENT (70)" .-> Document
-  Customer -- "REVIEWED (70)" --> Product
-  Customer -. "FROM_CHUNK (70)" .-> Chunk
-  Product -. "FROM_CHUNK (70)" .-> Chunk
+  Review -. "FROM_CHUNK (70)" .-> Chunk
+  Review -- "EVALUATES (69)" --> Product
+  Reviewer -. "FROM_CHUNK (69)" .-> Chunk
+  Reviewer -- "AUTHORED (69)" --> Review
+  Product -. "FROM_CHUNK (69)" .-> Chunk
   Product -- "HAS_ASSEMBLY (64)" --> Assembly
   Chunk -. "NEXT_CHUNK (60)" .-> Chunk
-  Customer -- "EXPERIENCED (50)" --> AssemblyExperience
-  AssemblyExperience -. "FROM_CHUNK (50)" .-> Chunk
-  QualityIssue -. "FROM_CHUNK (45)" .-> Chunk
-  Product -- "HAS_ISSUE (41)" --> QualityIssue
-  Customer -- "REPORTED (27)" --> QualityIssue
-  ProductFeature -. "FROM_CHUNK (18)" .-> Chunk
+  Review -- "REPORTS (29)" --> Defect
+  Defect -. "FROM_CHUNK (29)" .-> Chunk
   Product == "CORRESPONDS_TO (10)" ==> Product
+  Review -- "MENTIONS_DEFECT_IN (7)" --> Part
+  Part -. "FROM_CHUNK (7)" .-> Chunk
+  Defect -- "OBSERVED_IN (5)" --> Part
+  Part == "CORRESPONDS_TO (4)" ==> Part
+  Part -- "BELONGS_TO (3)" --> Product
+  Supplier -. "FROM_CHUNK (2)" .-> Chunk

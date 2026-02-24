@@ -7,6 +7,7 @@ Provides the foundational components for building knowledge graph agents:
 """
 
 from core.agent import run_agent, run_agent_sync
+from core.config import CLAUDE_MODEL, CLAUDE_MODEL_STRUCTURED
 from core.tracing import traceable, wrap_anthropic, mcp_traceable
 from core.state import (
     load_state,
@@ -43,6 +44,9 @@ __all__ = [
     "execute_tool",
     "format_tool_result",
     "format_tool_error",
+    # Config
+    "CLAUDE_MODEL",
+    "CLAUDE_MODEL_STRUCTURED",
     # Tracing
     "traceable",
     "wrap_anthropic",

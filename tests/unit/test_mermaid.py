@@ -347,7 +347,7 @@ class TestGenerateLiveDiagram:
         )
         result = generate_live_diagram(driver, {})
 
-        assert "-->|SUPPLIES (50)|" in result
+        assert '-- "SUPPLIES (50)" -->' in result
 
     def test_corresponds_to_thick_arrow(self):
         from utils.mermaid import generate_live_diagram
@@ -363,7 +363,7 @@ class TestGenerateLiveDiagram:
         )
         result = generate_live_diagram(driver, {})
 
-        assert "==>|CORRESPONDS_TO (30)|" in result
+        assert '== "CORRESPONDS_TO (30)" ==>' in result
 
     def test_truncation_over_50(self):
         from utils.mermaid import generate_live_diagram

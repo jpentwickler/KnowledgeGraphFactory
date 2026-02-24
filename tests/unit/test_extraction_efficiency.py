@@ -542,7 +542,8 @@ class TestProposeEntityTypes:
                 propose_entity_types(state, content="test")
 
         call_kwargs = mock_client.messages.create.call_args
-        assert call_kwargs.kwargs["model"] == "claude-sonnet-4-20250514"
+        from core.config import CLAUDE_MODEL_STRUCTURED
+        assert call_kwargs.kwargs["model"] == CLAUDE_MODEL_STRUCTURED
 
     def test_uses_output_config(self):
         from tools.extraction_tools import propose_entity_types, ENTITY_TYPE_JSON_SCHEMA
@@ -587,7 +588,8 @@ class TestProposeEntityTypes:
                 )
 
         call_kwargs = mock_client.messages.create.call_args.kwargs
-        assert call_kwargs["messages"][0]["content"] == "focus on quality defects"
+        assert call_kwargs["messages"][0]["content"].startswith("focus on quality defects")
+        assert "## File Content" in call_kwargs["messages"][0]["content"]
 
     def test_default_user_message(self):
         from tools.extraction_tools import propose_entity_types
@@ -607,7 +609,8 @@ class TestProposeEntityTypes:
                 propose_entity_types(state, content="test")
 
         call_kwargs = mock_client.messages.create.call_args.kwargs
-        assert call_kwargs["messages"][0]["content"] == "Analyze the files and propose entity types."
+        assert call_kwargs["messages"][0]["content"].startswith("Analyze the files and propose entity types.")
+        assert "## File Content" in call_kwargs["messages"][0]["content"]
 
     def test_skips_thinking_blocks(self):
         from tools.extraction_tools import propose_entity_types
@@ -636,6 +639,40 @@ class TestProposeEntityTypes:
                 result = propose_entity_types(state, content="test")
 
         assert result["analysis_summary"] == "ok"
+
+    def test_ner_prompt_contains_example(self):
+        from tools.extraction_tools import _build_ner_prompt
+
+        state = {
+            "approved_user_goal": {"kind": "test", "description": "test"},
+            "approved_construction_plan": {},
+        }
+        prompt = _build_ner_prompt(state)
+        assert "## Example" in prompt
+        assert "NOT entity types" in prompt
+        assert "File Content" not in prompt
+
+    def test_ner_content_in_user_message_not_system(self):
+        from tools.extraction_tools import propose_entity_types
+
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = self._mock_response(
+            {"entity_types": [], "analysis_summary": ""}
+        )
+        state = {
+            "approved_user_goal": {"kind": "test", "description": "test"},
+            "approved_construction_plan": {},
+            "approved_files": {"unstructured": []},
+        }
+
+        with patch("tools.extraction_tools.wrap_anthropic", return_value=mock_client):
+            with patch("tools.extraction_tools.anthropic.Anthropic"):
+                propose_entity_types(state, content="my file content here")
+
+        call_kwargs = mock_client.messages.create.call_args.kwargs
+        # File content should be in user message, not system prompt
+        assert "my file content here" in call_kwargs["messages"][0]["content"]
+        assert "my file content here" not in call_kwargs["system"]
 
 
 # ---------------------------------------------------------------------------
@@ -734,7 +771,22 @@ class TestProposeFactTypes:
                 )
 
         call_kwargs = mock_client.messages.create.call_args.kwargs
-        assert call_kwargs["messages"][0]["content"] == "focus on supply chain"
+        assert call_kwargs["messages"][0]["content"].startswith("focus on supply chain")
+        assert "## File Content" in call_kwargs["messages"][0]["content"]
+
+    def test_fact_prompt_contains_example(self):
+        from tools.extraction_tools import _build_fact_prompt
+
+        state = {
+            "approved_user_goal": {"kind": "test", "description": "test"},
+            "approved_entity_types": {
+                "Product": {"source": "well_known", "description": "A product"},
+            },
+        }
+        prompt = _build_fact_prompt(state)
+        assert "## Example" in prompt
+        assert "Bad fact types" in prompt
+        assert "File Content" not in prompt
 
 
 # ---------------------------------------------------------------------------

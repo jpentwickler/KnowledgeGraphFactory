@@ -1,0 +1,52 @@
+{
+  "entity_types": {
+    "required": [
+      {"name": "Product", "source": "well_known",
+       "evidence_patterns": ["chair", "table", "desk", "sofa"]},
+      {"name": "Reviewer", "source": "discovered",
+       "evidence_patterns": ["@", "reviewer", "username"]},
+      {"name": "Issue", "source": "discovered",
+       "evidence_patterns": ["cracked", "broken", "defective", "wobble"]},
+      {"name": "Review", "source": "discovered",
+       "evidence_patterns": ["rating", "stars", "recommend", "purchase"]}
+    ],
+    "bonus": [
+      {"name": "Location", "source": "discovered",
+       "evidence_patterns": ["Minneapolis", "Portland", "Seattle"]},
+      {"name": "Feature", "source": "discovered",
+       "evidence_patterns": ["assembly", "storage", "cable management"]},
+      {"name": "CustomerService", "source": "discovered",
+       "evidence_patterns": ["customer service", "support", "replacement"]}
+    ]
+  },
+  "fact_types": {
+    "required": [
+      {"subject": "Reviewer", "predicate": "authored", "object": "Review"},
+      {"subject": "Review", "predicate": "evaluates", "object": "Product"},
+      {"subject": "Product", "predicate": "has_issue", "object": "Issue"}
+    ],
+    "bonus": [
+      {"subject": "Reviewer", "predicate": "reviewed", "object": "Product"},
+      {"subject": "Reviewer", "predicate": "located_in", "object": "Location"},
+      {"subject": "Product", "predicate": "has_feature", "object": "Feature"},
+      {"subject": "Reviewer", "predicate": "reported_issue", "object": "Issue"}
+    ]
+  },
+  "name_equivalences": {
+    "Issue": ["ProductIssue", "Defect", "Problem", "QualityIssue"],
+    "Reviewer": ["User", "Customer", "Author"],
+    "Review": ["CustomerReview", "Feedback", "Rating", "Evaluation"],
+    "Location": ["City", "Place", "Geography"],
+    "Feature": ["ProductFeature", "Attribute"],
+    "CustomerService": ["Support", "CustomerInteraction", "CustomerSupport"]
+  },
+  "predicate_equivalences": {
+    "authored": ["wrote", "wrote_review", "created", "submitted"],
+    "evaluates": ["reviews", "rates", "assesses", "covers"],
+    "reviewed": ["wrote_review_of", "rated"],
+    "located_in": ["lives_in", "based_in", "from"],
+    "has_issue": ["affects", "has_defect", "has_problem", "has_quality_issue"],
+    "has_feature": ["has_attribute", "includes_feature"],
+    "reported_issue": ["reported", "flagged", "complained_about"]
+  }
+}

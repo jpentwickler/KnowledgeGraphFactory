@@ -1,0 +1,75 @@
+{
+  "timestamp": "2026-02-24T22:47:49.366790+00:00",
+  "models": {
+    "agent": "claude-sonnet-4-20250514",
+    "structured": "claude-sonnet-4-6"
+  },
+  "metrics": {
+    "required_entity_recall": 0.75,
+    "entity_precision": 0.8,
+    "grounding_rate": 1.0,
+    "zero_evidence_count": 0,
+    "required_fact_recall": 0.3333,
+    "bonus_entity_recall": 0.0,
+    "evidence_depth": 36.3
+  },
+  "proposed_entities": [
+    {
+      "name": "Product",
+      "source": "well_known"
+    },
+    {
+      "name": "Review",
+      "source": "discovered"
+    },
+    {
+      "name": "Reviewer",
+      "source": "discovered"
+    },
+    {
+      "name": "Issue",
+      "source": "discovered"
+    },
+    {
+      "name": "Supplier",
+      "source": "well_known"
+    }
+  ],
+  "proposed_facts": [
+    {
+      "subject": "Reviewer",
+      "predicate": "wrote",
+      "object": "Review"
+    },
+    {
+      "subject": "Review",
+      "predicate": "evaluates",
+      "object": "Product"
+    },
+    {
+      "subject": "Review",
+      "predicate": "reports",
+      "object": "Issue"
+    },
+    {
+      "subject": "Issue",
+      "predicate": "affects",
+      "object": "Product"
+    },
+    {
+      "subject": "Supplier",
+      "predicate": "supplies_component_for",
+      "object": "Product"
+    },
+    {
+      "subject": "Issue",
+      "predicate": "traced_to",
+      "object": "Supplier"
+    },
+    {
+      "subject": "Reviewer",
+      "predicate": "located_in",
+      "object": "Reviewer"
+    }
+  ]
+}

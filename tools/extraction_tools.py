@@ -22,6 +22,7 @@ from core import (
     get_approved,
     has_approved,
 )
+from core.config import CLAUDE_MODEL_STRUCTURED
 from core.tracing import traceable, wrap_anthropic
 
 # Regex for valid predicate labels: lowercase letters, digits, underscores only
@@ -154,7 +155,7 @@ def build_well_known_types(state: dict) -> str:
 
 
 def build_file_content(
-    state: dict, max_chars: int = 50_000
+    state: dict, max_chars: int = 150_000
 ) -> tuple[str | dict[str, str], bool]:
     """Read full text of all approved unstructured files.
 
@@ -281,7 +282,7 @@ FACT_TYPE_JSON_SCHEMA = {
 }
 
 
-def _build_ner_prompt(state: dict, file_content: str) -> str:
+def _build_ner_prompt(state: dict) -> str:
     """Build the system prompt for NER structured-output call."""
     user_goal = get_approved(state, "user_goal") or {}
     goal_str = format_user_goal(user_goal)
@@ -304,6 +305,27 @@ Analyze the provided text and propose entity types (categories, NOT instances).
 ## Well-Known Entity Types (from existing graph schema)
 {well_known}
 
+## Example
+
+Text (well-known types: [Employee, Department]):
+> "Lisa Chen in the London office reported that the CRM module crashes
+> during peak hours. The infrastructure team traced it to a memory leak
+> in the caching layer."
+
+Good entity types:
+- Employee (well_known) — evidence_patterns: ["Lisa", "team", "manager", "staff"]
+  Broad patterns that catch names AND role references across files.
+- Department (well_known) — evidence_patterns: ["infrastructure", "team", "office"]
+- Software (discovered) — evidence_patterns: ["module", "CRM", "system", "layer"]
+  Not "CRMModule" — that's an instance, not a category.
+- Defect (discovered) — evidence_patterns: ["crashes", "leak", "bug", "error"]
+  Not "MemoryLeak" — that's a specific defect, not a type.
+
+NOT entity types:
+- PeakHours — a condition, not an entity
+- Count or Rating — measurements are properties, not entities
+- Thing or Item — too vague to be useful
+
 ## Quality Guidelines
 - Entity types must be singular nouns in PascalCase (e.g., ProductIssue)
 - Always include well-known types if they appear in the text (source: well_known)
@@ -313,13 +335,11 @@ Analyze the provided text and propose entity types (categories, NOT instances).
 - Quality over quantity: 3-6 meaningful types is better than 12 vague ones
 - For each type, provide 2-3 evidence_patterns (search terms to verify in text)
 
-## File Content
-{file_content}
-
+Analyze the file content provided in the user message.
 Return a JSON object with entity_types array and analysis_summary."""
 
 
-def _build_fact_prompt(state: dict, file_content: str) -> str:
+def _build_fact_prompt(state: dict) -> str:
     """Build the system prompt for Fact Type structured-output call."""
     user_goal = get_approved(state, "user_goal") or {}
     goal_str = format_user_goal(user_goal)
@@ -344,6 +364,20 @@ between approved entity types.
 Both subject and object MUST be one of these approved types:
 {entity_types_str}
 
+## Example
+
+Approved entity types: [Employee, Department, Software, Defect]
+
+Good fact types:
+- (Employee)-[works_in]->(Department) — natural reading direction, specific verb
+- (Employee)-[reported]->(Defect) — captures the action, not a passive rewording
+- (Defect)-[affects]->(Software) — directional: the defect impacts the software
+
+Bad fact types:
+- (Software)-[related_to]->(Defect) — "related_to" says nothing; use "has_defect" or reverse
+- (Defect)-[reported_by]->(Employee) — passive; prefer (Employee)-[reported]->(Defect)
+- (Department)-[has]->(Employee) — "has" is too generic; "employs" is clearer
+
 ## Design Rules
 - Predicates must be lowercase_with_underscores (e.g., has_issue, supplied_by)
 - Choose the natural reading direction (Customer wrote Review, not Review written_by Customer)
@@ -351,9 +385,7 @@ Both subject and object MUST be one of these approved types:
 - No redundant pairs -- pick the most natural direction
 - Every fact type must support the user's stated goal
 
-## File Content
-{file_content}
-
+Analyze the file content provided in the user message.
 Return a JSON object with fact_types array and analysis_summary."""
 
 
@@ -377,14 +409,15 @@ def propose_entity_types(
     if user_message is None:
         user_message = "Analyze the files and propose entity types."
 
-    system_prompt = _build_ner_prompt(state, content)
+    system_prompt = _build_ner_prompt(state)
+    user_content = f"{user_message}\n\n## File Content\n{content}"
     client = wrap_anthropic(anthropic.Anthropic())
 
     response = client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model=CLAUDE_MODEL_STRUCTURED,
         max_tokens=4096,
         system=system_prompt,
-        messages=[{"role": "user", "content": user_message}],
+        messages=[{"role": "user", "content": user_content}],
         output_config={
             "format": {
                 "type": "json_schema",
@@ -424,14 +457,15 @@ def propose_fact_types(
     if user_message is None:
         user_message = "Analyze the files and propose fact types."
 
-    system_prompt = _build_fact_prompt(state, content)
+    system_prompt = _build_fact_prompt(state)
+    user_content = f"{user_message}\n\n## File Content\n{content}"
     client = wrap_anthropic(anthropic.Anthropic())
 
     response = client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model=CLAUDE_MODEL_STRUCTURED,
         max_tokens=4096,
         system=system_prompt,
-        messages=[{"role": "user", "content": user_message}],
+        messages=[{"role": "user", "content": user_content}],
         output_config={
             "format": {
                 "type": "json_schema",
