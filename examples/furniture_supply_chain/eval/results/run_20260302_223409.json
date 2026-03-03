@@ -1,0 +1,89 @@
+{
+  "timestamp": "2026-03-02T22:34:09.880279+00:00",
+  "models": {
+    "agent": "claude-sonnet-4-20250514",
+    "structured": "claude-sonnet-4-6"
+  },
+  "metrics": {
+    "required_entity_recall": 1.0,
+    "entity_precision": 0.6667,
+    "grounding_rate": 1.0,
+    "zero_evidence_count": 0,
+    "required_fact_recall": 1.0,
+    "bonus_entity_recall": 0.0,
+    "evidence_depth": 38.7
+  },
+  "proposed_entities": [
+    {
+      "name": "Product",
+      "source": "well_known"
+    },
+    {
+      "name": "Review",
+      "source": "discovered"
+    },
+    {
+      "name": "Reviewer",
+      "source": "discovered"
+    },
+    {
+      "name": "Part",
+      "source": "well_known"
+    },
+    {
+      "name": "Defect",
+      "source": "discovered"
+    },
+    {
+      "name": "Supplier",
+      "source": "well_known"
+    }
+  ],
+  "proposed_facts": [
+    {
+      "subject": "Reviewer",
+      "predicate": "wrote",
+      "object": "Review"
+    },
+    {
+      "subject": "Review",
+      "predicate": "evaluates",
+      "object": "Product"
+    },
+    {
+      "subject": "Review",
+      "predicate": "mentions",
+      "object": "Defect"
+    },
+    {
+      "subject": "Review",
+      "predicate": "mentions",
+      "object": "Part"
+    },
+    {
+      "subject": "Defect",
+      "predicate": "affects",
+      "object": "Product"
+    },
+    {
+      "subject": "Defect",
+      "predicate": "found_in",
+      "object": "Part"
+    },
+    {
+      "subject": "Part",
+      "predicate": "belongs_to",
+      "object": "Product"
+    },
+    {
+      "subject": "Supplier",
+      "predicate": "supplies",
+      "object": "Part"
+    },
+    {
+      "subject": "Defect",
+      "predicate": "traced_to",
+      "object": "Supplier"
+    }
+  ]
+}

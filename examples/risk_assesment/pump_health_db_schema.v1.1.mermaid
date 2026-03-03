@@ -1,0 +1,81 @@
+erDiagram
+    PUMP {
+        VARCHAR pump_serial_number PK "Unique identifier"
+        VARCHAR asset_id UK "GraphQL API asset identifier"
+        VARCHAR pump_product_family "Product family grouping"
+    }
+
+    TELEMETRY {
+        BIGINT id PK "Auto-generated surrogate key"
+        VARCHAR pump_serial_number FK "References pump"
+        TIMESTAMPTZ ts "Measurement timestamp"
+        BOOLEAN on_off "Pump on/off state"
+        DOUBLE vibration "Vibration reading"
+        DOUBLE ambient_temperature "Ambient temperature reading"
+        DOUBLE oil_temperature "Oil temperature reading"
+        DOUBLE exhaust_temperature "Exhaust temperature reading"
+        DOUBLE inlet_pressure "Inlet pressure reading"
+        DOUBLE exhaust_pressure "Exhaust pressure reading"
+    }
+
+    HEALTH_MODEL {
+        BIGINT id PK "Auto-generated surrogate key"
+        VARCHAR pump_serial_number FK "References pump (unique)"
+        TIMESTAMPTZ training_timestamp "When model was trained"
+        TIMESTAMPTZ start_date "Training data start (telemetry range)"
+        TIMESTAMPTZ end_date "Training data end (telemetry range)"
+    }
+
+    HEALTH_INDICATOR {
+        BIGINT id PK "Auto-generated surrogate key"
+        BIGINT health_model_id FK "References health_model"
+        DATE indicator_date UK "One indicator per day (unique with model)"
+        DOUBLE health_index "Overall health score"
+        DOUBLE drift_to_threshold_time "Time to threshold drift"
+        DOUBLE correlation_vibration "Vibration correlation"
+        DOUBLE correlation_ambient_temperature "Ambient temperature correlation"
+        DOUBLE correlation_oil_temperature "Oil temperature correlation"
+        DOUBLE correlation_exhaust_temperature "Exhaust temperature correlation"
+        DOUBLE correlation_inlet_pressure "Inlet pressure correlation"
+        DOUBLE correlation_exhaust_pressure "Exhaust pressure correlation"
+    }
+
+    HEALTH_FORECAST {
+        BIGINT id PK "Auto-generated surrogate key"
+        BIGINT health_model_id FK "References health_model"
+        DATE origin_date "Date the model ran"
+        DATE forecast_date "Predicted future date"
+        DOUBLE health_index "Forecasted health score"
+        INT drift_to_threshold_time "Forecasted drift time in days"
+    }
+
+    ALERT {
+        BIGINT id PK "Auto-generated surrogate key"
+        VARCHAR alert_external_id UK "GraphQL API alert ID"
+        VARCHAR pump_serial_number FK "References pump"
+        VARCHAR severity "WARNING or ERROR"
+        VARCHAR status "UN_ACKNOWLEDGED ACKNOWLEDGED ARCHIVED"
+        TIMESTAMPTZ detected_at "When the alert was detected"
+        VARCHAR title "Formatted display title"
+        TEXT message "Descriptive alert message"
+        VARCHAR parameter_alias "Sensor that triggered the alert"
+        DECIMAL measurement_value "Telemetry value that triggered alert"
+        VARCHAR unit "Measurement unit"
+        TEXT recommendation "Recommendation (acknowledged alerts only)"
+        TIMESTAMPTZ acknowledged_at "When alert was acknowledged"
+    }
+
+    PUMP_STATUS_HISTORY {
+        BIGINT id PK "Auto-generated surrogate key"
+        VARCHAR pump_serial_number FK "References pump"
+        VARCHAR status "RUNNING OFF OFFLINE ALARM WARNING etc"
+        TIMESTAMPTZ started_at "When pump entered this status"
+        TIMESTAMPTZ ended_at "When pump left this status (NULL if current)"
+    }
+
+    PUMP ||--o{ TELEMETRY : "generates"
+    PUMP ||--o| HEALTH_MODEL : "has"
+    PUMP ||--o{ ALERT : "triggers"
+    PUMP ||--o{ PUMP_STATUS_HISTORY : "transitions"
+    HEALTH_MODEL ||--o{ HEALTH_INDICATOR : "produces"
+    HEALTH_MODEL ||--o{ HEALTH_FORECAST : "predicts"

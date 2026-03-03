@@ -10,7 +10,12 @@
       "Bash(python -c \"\nimport anthropic\n# Check what TextBlock serializes to\ntb = anthropic.types.TextBlock\\(type=''text'', text=''Hello''\\)\nprint\\(''TextBlock model_dump:'', tb.model_dump\\(\\)\\)\nprint\\(\\)\n\n# Check what ToolUseBlock serializes to  \ntub = anthropic.types.ToolUseBlock\\(type=''tool_use'', id=''test_123'', name=''test_tool'', input={''key'': ''value''}\\)\nprint\\(''ToolUseBlock model_dump:'', tub.model_dump\\(\\)\\)\nprint\\(\\)\n\n# Check if json.dumps works with these objects\nimport json\ntry:\n    json.dumps\\([tb, tub]\\)\n    print\\(''json.dumps works directly''\\)\nexcept TypeError as e:\n    print\\(f''json.dumps fails: {e}''\\)\n    \n# Check if model_dump result is json-serializable\nprint\\(''model_dump is json-serializable:'', json.dumps\\([tb.model_dump\\(\\), tub.model_dump\\(\\)]\\)\\)\nprint\\(\\)\n\n# Check if Claude API accepts model_dump format for messages\nconversation = [\n    {''role'': ''assistant'', ''content'': [tb.model_dump\\(\\), tub.model_dump\\(\\)]}\n]\nprint\\(''Conversation with model_dump:'', json.dumps\\(conversation, indent=2\\)\\)\n\")",
       "Bash(python -c \"\nimport anthropic\n\n# Check if the API accepts dict-format content blocks in messages\n# This simulates: can we store model_dump\\(\\) and pass it back as conversation?\ntb = anthropic.types.TextBlock\\(type=''text'', text=''Hello''\\)\ntub = anthropic.types.ToolUseBlock\\(type=''tool_use'', id=''test_123'', name=''test_tool'', input={''key'': ''value''}\\)\n\n# The conversation as stored by run_agent_sync has SDK objects\nraw_conversation = [\n    {''role'': ''user'', ''content'': ''Hi there''},\n    {''role'': ''assistant'', ''content'': [tb, tub]},  # SDK objects\n    {''role'': ''user'', ''content'': [{''type'': ''tool_result'', ''tool_use_id'': ''test_123'', ''content'': ''{\"\"status\"\": \"\"ok\"\"}''}]},\n    {''role'': ''assistant'', ''content'': [anthropic.types.TextBlock\\(type=''text'', text=''Done''\\)]},\n]\n\n# Check structure types\nfor i, msg in enumerate\\(raw_conversation\\):\n    content = msg[''content'']\n    if isinstance\\(content, list\\):\n        types = [type\\(c\\).__name__ for c in content]\n    else:\n        types = [type\\(content\\).__name__]\n    print\\(f''Message {i} \\({msg[\"\"role\"\"]}\\): content types = {types}''\\)\n\")",
       "Bash(python:*)",
-      "Bash(git stash:*)"
+      "Bash(git stash:*)",
+      "WebSearch",
+      "WebFetch(domain:docs.anthropic.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "mcp__kg-factory__kg_query"
     ]
   },
   "enableAllProjectMcpServers": true,
