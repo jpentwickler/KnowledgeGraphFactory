@@ -1709,7 +1709,7 @@ def _handle_candidate_approval(state, driver, msg_lower):
     Returns:
         dict with agent_response and status.
     """
-    from pipelines import create_correspondences_for_candidates
+    from pipelines.entity_resolution import create_correspondences_for_candidates
 
     candidates = state.get("proposed_resolution_candidates", [])
     if not candidates:
@@ -1762,7 +1762,7 @@ def _handle_candidate_approval(state, driver, msg_lower):
         approved = [candidates[i - 1] for i in indices]
 
     # Group approved candidates by (label, entity_key, domain_key)
-    groups = {}
+    groups: dict[tuple, list] = {}
     for c in approved:
         key = (c["label"], c["entity_key"], c["domain_key"])
         groups.setdefault(key, []).append(c)
@@ -1771,13 +1771,11 @@ def _handle_candidate_approval(state, driver, msg_lower):
     lines = ["Approved candidates linked!\n"]
 
     for (label, entity_key, domain_key), pairs in groups.items():
-        count = create_correspondences_for_candidates(
-            driver, label, entity_key, domain_key, pairs
-        )
-        total_created += count
-        for p in pairs:
+        created = create_correspondences_for_candidates(driver, label, entity_key, domain_key, pairs)
+        total_created += created
+        for c in pairs:
             lines.append(
-                f'  [OK] {label}: "{p["entity_name"]}" -> "{p["domain_name"]}"'
+                f'  [OK] {c["label"]}: "{c["entity_name"]}" -> "{c["domain_name"]}"'
             )
 
     lines.append(f"\nTotal new CORRESPONDS_TO relationships: {total_created}")

@@ -1,12 +1,10 @@
 """Entity Resolution - Link Subject graph entities to Domain graph nodes.
 
-Follows the Neo4j GraphRAG course patterns (Lesson 8):
+Uses Jaro-Winkler string matching via APOC:
 1. Find unique entity labels in the subject graph
-2. Find matching labels in the domain graph
-3. Correlate property keys using fuzzy matching (rapidfuzz)
-4. Create CORRESPONDS_TO relationships using Jaro-Winkler distance in Neo4j
-
-Requires APOC plugin installed in Neo4j for apoc.text.jaroWinklerDistance.
+2. Correlate property keys between entity and domain nodes using fuzzy matching
+3. Create CORRESPONDS_TO relationships for confident matches (distance < threshold)
+4. Return borderline matches as candidates for human review
 """
 
 import re
@@ -14,6 +12,10 @@ import re
 from core.tracing import traceable
 from neo4j import Driver
 from rapidfuzz import fuzz
+
+# --- Jaro-Winkler thresholds ---
+JAROWINKLER_AUTO_RESOLVE = 0.90      # similarity >= this → auto-resolve
+JAROWINKLER_CANDIDATE_LOW = 0.70     # similarity in [LOW, AUTO_RESOLVE) → candidate
 
 
 def find_unique_entity_labels(driver: Driver) -> list[str]:
@@ -322,12 +324,13 @@ def create_correspondences_for_candidates(
 
 @traceable(name="pipeline.resolve_entities")
 def resolve_entities(state: dict, driver: Driver) -> dict:
-    """Full entity resolution pipeline.
+    """Full entity resolution pipeline using Jaro-Winkler string matching.
 
     For each entity label found in the subject graph:
-    1. Check if the same label exists in the domain graph
-    2. If so, correlate property keys using fuzzy matching
-    3. Use the best key pair to create CORRESPONDS_TO relationships
+    1. Find property keys for entity and domain nodes
+    2. Correlate keys using fuzzy matching to find the best (entity_key, domain_key) pair
+    3. Create CORRESPONDS_TO relationships for confident matches (using APOC)
+    4. Return borderline matches as candidates for human review
 
     Args:
         state: Pipeline state (used for progress tracking).
@@ -358,8 +361,9 @@ def resolve_entities(state: dict, driver: Driver) -> dict:
         print(f"\n  Checking label: {label}")
         results["labels_checked"].append(label)
 
-        # Check if this label also exists in the domain graph
+        entity_keys = find_unique_entity_keys(driver, label)
         domain_keys = find_unique_domain_keys(driver, label)
+
         if not domain_keys:
             print(f"    No domain nodes with label '{label}' found. Skipping.")
             results["per_label_results"].append(
@@ -371,91 +375,67 @@ def resolve_entities(state: dict, driver: Driver) -> dict:
             )
             continue
 
-        entity_keys = find_unique_entity_keys(driver, label)
         if not entity_keys:
-            print(f"    No entity keys found for '{label}'. Skipping.")
+            print(f"    No entity nodes with label '{label}' found. Skipping.")
             results["per_label_results"].append(
                 {
                     "label": label,
-                    "status": "no_entity_keys",
-                    "message": f"No entity property keys for '{label}'",
+                    "status": "no_entity_nodes",
+                    "message": f"No entity nodes with label '{label}'",
                 }
             )
             continue
 
-        # Pre-filter keys by name similarity to avoid expensive Cypher cross-joins
-        correlated = correlate_entity_and_domain_keys(
-            label, entity_keys, domain_keys, similarity=0.5
-        )
-
+        # Find best key pair using fuzzy matching
+        correlated = correlate_entity_and_domain_keys(label, entity_keys, domain_keys)
         if not correlated:
-            print(f"    No correlating keys found for '{label}'. Skipping.")
+            print(f"    No matching property keys found for label '{label}'. Skipping.")
             results["per_label_results"].append(
                 {
                     "label": label,
-                    "status": "no_key_correlation",
-                    "entity_keys": entity_keys,
-                    "domain_keys": domain_keys,
-                    "message": "No property keys correlate above threshold",
+                    "status": "no_key_match",
+                    "message": f"No matching property keys for label '{label}'",
                 }
             )
             continue
 
-        # Use the best key pair
-        best_entity_key, best_domain_key, best_score = correlated[0]
-        print(
-            f"    Best key pair: {best_entity_key} <-> {best_domain_key} "
-            f"(score: {best_score:.2f})"
+        entity_key, domain_key, key_score = correlated[0]
+        print(f"    Best key pair: '{entity_key}' <-> '{domain_key}' (score: {key_score:.3f})")
+
+        # Auto-resolve confident matches
+        resolve_result = correlate_subject_and_domain_nodes(
+            driver, label, entity_key, domain_key, similarity=JAROWINKLER_AUTO_RESOLVE
         )
+        count = resolve_result["relationships_created"]
+        print(f"    Created {count} CORRESPONDS_TO relationships")
 
-        # Create CORRESPONDS_TO relationships
-        try:
-            resolution = correlate_subject_and_domain_nodes(
-                driver, label, best_entity_key, best_domain_key
-            )
-            count = resolution["relationships_created"]
-            print(f"    Created {count} CORRESPONDS_TO relationships")
+        # Find borderline candidates for human review
+        candidate_min = 1.0 - JAROWINKLER_AUTO_RESOLVE   # 0.10
+        candidate_max = 1.0 - JAROWINKLER_CANDIDATE_LOW   # 0.30
+        label_candidates = find_candidate_matches(
+            driver, label, entity_key, domain_key,
+            min_distance=candidate_min,
+            max_distance=candidate_max,
+        )
+        if label_candidates:
+            print(f"    Found {len(label_candidates)} candidate matches for review")
+        results["candidates"].extend(label_candidates)
 
-            if count > 0:
-                results["labels_resolved"].append(label)
-            results["total_correspondences"] += count
+        if count > 0:
+            results["labels_resolved"].append(label)
+        results["total_correspondences"] += count
 
-            # Find borderline candidates for human review
-            label_candidates = find_candidate_matches(
-                driver, label, best_entity_key, best_domain_key
-            )
-            if label_candidates:
-                print(
-                    f"    Found {len(label_candidates)} candidate matches for review"
-                )
-                results["candidates"].extend(label_candidates)
-
-            results["per_label_results"].append(
-                {
-                    "label": label,
-                    "status": "resolved" if count > 0 else "no_matches",
-                    "entity_key": best_entity_key,
-                    "domain_key": best_domain_key,
-                    "key_similarity": best_score,
-                    "relationships_created": count,
-                    "candidates": label_candidates,
-                }
-            )
-        except Exception as exc:
-            error_msg = str(exc)
-            print(f"    [FAIL] {error_msg}")
-            if "apoc" in error_msg.lower() or "unknown function" in error_msg.lower():
-                print(
-                    "    HINT: APOC plugin may not be installed. "
-                    "Entity resolution requires apoc.text.jaroWinklerDistance."
-                )
-            results["per_label_results"].append(
-                {
-                    "label": label,
-                    "status": "error",
-                    "error": error_msg,
-                }
-            )
+        results["per_label_results"].append(
+            {
+                "label": label,
+                "status": "resolved" if count > 0 else "no_matches",
+                "entity_key": entity_key,
+                "domain_key": domain_key,
+                "key_similarity": key_score,
+                "relationships_created": count,
+                "candidates": label_candidates,
+            }
+        )
 
     # Update progress in state
     if "text_graph_progress" not in state:
