@@ -56,11 +56,15 @@ def get_neo4j_driver(
     # Create driver with connection pooling
     # Note: Encryption is automatically enabled for neo4j+s:// and bolt+s:// URIs.
     # Do NOT pass encrypted= parameter with these URIs (it will cause an error).
+    pool_size = int(os.environ.get("NEO4J_POOL_SIZE", "50"))
+    connection_timeout = float(os.environ.get("NEO4J_CONNECTION_TIMEOUT", "30"))
+
     try:
         driver = GraphDatabase.driver(
             uri,
             auth=(user, password),
-            max_connection_pool_size=50,
+            max_connection_pool_size=pool_size,
+            connection_timeout=connection_timeout,
         )
 
         # Verify connectivity

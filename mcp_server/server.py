@@ -1547,6 +1547,10 @@ async def _build_unstructured(state, driver, message):
     results = await build_text_graph(state, driver, message)
     _save_state(state)  # Persist text_graph_progress
 
+    from tools.query_tools import _introspect_text_schema
+    _introspect_text_schema(driver, state)
+    _save_state(state)  # Persist text_entity_schema
+
     # Create indexes after first successful file processing (Phase 3: US013)
     if results["files_processed"] and "_index_creation_attempted" not in state:
         index_status = _create_text_indexes(driver)
@@ -1641,6 +1645,10 @@ def _build_resolve(state, driver, message=""):
 
     results = resolve_entities(state, driver)
     _save_state(state)  # Persist text_graph_progress + proposed_resolution_candidates
+
+    from tools.query_tools import _introspect_text_schema
+    _introspect_text_schema(driver, state)
+    _save_state(state)  # Persist text_entity_schema
 
     labels_checked = results["labels_checked"]
     labels_resolved = results["labels_resolved"]
@@ -2025,6 +2033,7 @@ async def kg_query(question: str, context: str = "") -> dict:
         _select_retrieval_strategy,
         _execute_schema_query,
         _execute_cypher,
+        _execute_validated_cypher,
         _execute_vector_search,
         _execute_hybrid_search,
         _execute_cross_layer_traversal
@@ -2045,7 +2054,11 @@ async def kg_query(question: str, context: str = "") -> dict:
             if strategy == "schema":
                 result = _execute_schema_query(driver, state)
             elif strategy == "cypher":
-                result = _execute_cypher(driver, params["cypher_query"])
+                result, correction_note = await _execute_validated_cypher(
+                    driver, params["cypher_query"], question, state
+                )
+                if correction_note:
+                    reasoning += f" [{correction_note}]"
             elif strategy == "vector":
                 result = _execute_vector_search(driver, question, params.get("top_k", 5))
             elif strategy == "hybrid":

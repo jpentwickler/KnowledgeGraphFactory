@@ -1,0 +1,35 @@
+# Query-only Docker image for KG-Factory.
+# Ships the read-only query server without construction agents or dev tools.
+#
+# Build:  docker build -f Dockerfile.query -t kg-query .
+# Run:    docker run -p 8000:8000 --env-file .env kg-query
+#
+# Required env vars: NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, ANTHROPIC_API_KEY
+# Optional: OPENAI_API_KEY (for vector/hybrid/cross_layer), KG_AUTH_TOKENS
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install minimal dependencies (no pandas, rapidfuzz, pytest)
+COPY requirements-query.txt .
+RUN pip install --no-cache-dir -r requirements-query.txt
+
+# Copy only query-related source files
+COPY core/ core/
+COPY utils/ utils/
+COPY tools/query_tools.py tools/query_tools.py
+COPY pipelines/query_builder.py pipelines/query_builder.py
+COPY mcp_server/query_server.py mcp_server/query_server.py
+
+# Stub out __init__.py files that import construction modules
+RUN echo '"""Tools package (query-only stub)."""' > tools/__init__.py && \
+    echo '"""Pipelines package (query-only stub)."""' > pipelines/__init__.py && \
+    echo "" > mcp_server/__init__.py
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
+
+CMD ["uvicorn", "mcp_server.query_server:app", "--host", "0.0.0.0", "--port", "8000"]

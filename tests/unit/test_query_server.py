@@ -67,9 +67,9 @@ class TestRunKgQuery:
     @patch("mcp_server.query_server._load_state_once")
     @patch("mcp_server.query_server._get_driver")
     @patch("pipelines.query_builder._select_retrieval_strategy", new_callable=AsyncMock)
-    @patch("pipelines.query_builder._execute_cypher")
-    async def test_cypher_strategy(self, mock_cypher, mock_strategy, mock_driver, mock_state):
-        """Routes to _execute_cypher with generated query."""
+    @patch("pipelines.query_builder._execute_validated_cypher", new_callable=AsyncMock)
+    async def test_cypher_strategy(self, mock_validated, mock_strategy, mock_driver, mock_state):
+        """Routes to _execute_validated_cypher with generated query."""
         from mcp_server.query_server import _run_kg_query
 
         mock_driver.return_value = MagicMock()
@@ -79,20 +79,25 @@ class TestRunKgQuery:
             "parameters": {"cypher_query": "MATCH (s:Supplier) RETURN s.name LIMIT 5"},
             "reasoning": "Structured query needed",
         }
-        mock_cypher.return_value = {
-            "answer": "Found 5 suppliers",
-            "evidence": [{"name": "Supplier A"}],
-            "confidence": 0.9,
-            "details": {},
-        }
+        mock_validated.return_value = (
+            {
+                "answer": "Found 5 suppliers",
+                "evidence": [{"name": "Supplier A"}],
+                "confidence": 0.9,
+                "details": {},
+            },
+            "",  # no correction
+        )
 
         result = await _run_kg_query("List 5 suppliers")
 
         assert result["status"]["success"] is True
         assert result["status"]["selected_strategy"] == "cypher"
-        mock_cypher.assert_called_once_with(
+        mock_validated.assert_called_once_with(
             mock_driver.return_value,
             "MATCH (s:Supplier) RETURN s.name LIMIT 5",
+            "List 5 suppliers",
+            {},
         )
 
     @pytest.mark.asyncio
@@ -177,6 +182,112 @@ class TestRunKgQuery:
             "Previous answer mentioned Supplier A",
             {"some": "state"},
         )
+
+    @pytest.mark.asyncio
+    @patch("mcp_server.query_server._load_state_once")
+    @patch("mcp_server.query_server._get_driver")
+    @patch("pipelines.query_builder._select_retrieval_strategy", new_callable=AsyncMock)
+    @patch("pipelines.query_builder._execute_validated_cypher", new_callable=AsyncMock)
+    async def test_cypher_no_violation(self, mock_validated, mock_strategy, mock_driver, mock_state):
+        """No violation: result returned without reasoning annotation."""
+        from mcp_server.query_server import _run_kg_query
+
+        mock_driver.return_value = MagicMock()
+        mock_state.return_value = {}
+        mock_strategy.return_value = {
+            "strategy": "cypher",
+            "parameters": {"cypher_query": "MATCH (s:Supplier) RETURN s.name"},
+            "reasoning": "Structured query",
+        }
+        mock_validated.return_value = (
+            {"answer": "OK", "evidence": [], "confidence": 0.8, "details": {}},
+            "",  # no correction
+        )
+
+        result = await _run_kg_query("List suppliers")
+
+        assert result["status"]["reasoning"] == "Structured query"
+
+    @pytest.mark.asyncio
+    @patch("mcp_server.query_server._load_state_once")
+    @patch("mcp_server.query_server._get_driver")
+    @patch("pipelines.query_builder._select_retrieval_strategy", new_callable=AsyncMock)
+    @patch("pipelines.query_builder._execute_validated_cypher", new_callable=AsyncMock)
+    async def test_cypher_violation_detected(self, mock_validated, mock_strategy, mock_driver, mock_state):
+        """Violation detected: reasoning annotated with correction note."""
+        from mcp_server.query_server import _run_kg_query
+
+        mock_driver.return_value = MagicMock()
+        mock_state.return_value = {}
+        mock_strategy.return_value = {
+            "strategy": "cypher",
+            "parameters": {"cypher_query": "MATCH ..."},
+            "reasoning": "Cypher needed",
+        }
+        mock_validated.return_value = (
+            {"answer": "Corrected results", "evidence": [], "confidence": 0.8, "details": {}},
+            "Cross-layer Cypher uses domain rels ['SUPPLIES'] and text rels ['EVALUATES'] without CORRESPONDS_TO bridge",
+        )
+
+        result = await _run_kg_query("Which suppliers have complaints?")
+
+        assert "CORRESPONDS_TO" in result["status"]["reasoning"]
+        assert "Cypher needed" in result["status"]["reasoning"]
+
+    @pytest.mark.asyncio
+    @patch("mcp_server.query_server._load_state_once")
+    @patch("mcp_server.query_server._get_driver")
+    @patch("pipelines.query_builder._select_retrieval_strategy", new_callable=AsyncMock)
+    @patch("pipelines.query_builder._execute_validated_cypher", new_callable=AsyncMock)
+    async def test_cypher_regeneration_fails_gracefully(self, mock_validated, mock_strategy, mock_driver, mock_state):
+        """Regeneration failure still returns original query result."""
+        from mcp_server.query_server import _run_kg_query
+
+        mock_driver.return_value = MagicMock()
+        mock_state.return_value = {}
+        mock_strategy.return_value = {
+            "strategy": "cypher",
+            "parameters": {"cypher_query": "MATCH (n)-[:REL]->(m) RETURN n"},
+            "reasoning": "Cypher",
+        }
+        # Empty correction_note means regeneration failed and original was used
+        mock_validated.return_value = (
+            {"answer": "No results found.", "evidence": [], "confidence": 0.2, "details": {}},
+            "",
+        )
+
+        result = await _run_kg_query("Some cross-layer question")
+
+        assert result["status"]["success"] is True
+        assert result["status"]["reasoning"] == "Cypher"
+
+    @pytest.mark.asyncio
+    @patch("mcp_server.query_server._load_state_once")
+    @patch("mcp_server.query_server._get_driver")
+    @patch("pipelines.query_builder._select_retrieval_strategy", new_callable=AsyncMock)
+    @patch("pipelines.query_builder._execute_vector_search")
+    async def test_non_cypher_skips_validation(self, mock_vector, mock_strategy, mock_driver, mock_state):
+        """Non-cypher strategies skip cross-layer validation entirely."""
+        from mcp_server.query_server import _run_kg_query
+
+        mock_driver.return_value = MagicMock()
+        mock_state.return_value = {}
+        mock_strategy.return_value = {
+            "strategy": "vector",
+            "parameters": {"top_k": 5},
+            "reasoning": "Semantic search",
+        }
+        mock_vector.return_value = {
+            "answer": "Results",
+            "evidence": [],
+            "confidence": 0.7,
+            "details": {},
+        }
+
+        result = await _run_kg_query("Tell me about delays")
+
+        assert result["status"]["selected_strategy"] == "vector"
+        mock_vector.assert_called_once()
 
 
 # =============================================================================

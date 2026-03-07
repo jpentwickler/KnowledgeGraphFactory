@@ -23,11 +23,14 @@ from tools.query_tools import (
     _get_domain_node_properties,
     _get_domain_relationships,
     _get_text_entities,
+    _get_text_entity_properties,
     _get_text_relationships,
+    _detect_cross_layer_violation,
     format_cypher_results,
     format_retriever_results,
     calculate_confidence,
     _validate_read_only_cypher,
+    _escape_lucene,
 )
 from core.state import has_approved
 from core.tracing import traceable, wrap_anthropic
@@ -78,6 +81,30 @@ def _cross_layer_formatter(record: neo4j.Record):
             "domain_label": domain_label,
         }
     )
+
+
+def _format_text_entity_props_block(state: dict) -> str:
+    """Format text entity properties for inclusion in prompts.
+
+    Returns a multi-line string showing entity labels with their properties
+    and sample values, or empty string if no text_entity_schema in state.
+    """
+    text_props = _get_text_entity_properties(state)
+    if not text_props:
+        return ""
+    lines = ["  Entity properties:"]
+    for label, info in text_props.items():
+        props = info.get("properties", {})
+        if props:
+            parts = []
+            for pname, pinfo in props.items():
+                sample = pinfo.get("sample", "")
+                if sample:
+                    parts.append(f'{pname} (e.g. "{sample}")')
+                else:
+                    parts.append(pname)
+            lines.append(f"    {label} [{', '.join(parts)}]")
+    return "\n".join(lines) + "\n"
 
 
 # =============================================================================
@@ -143,7 +170,25 @@ async def _select_retrieval_strategy(
                 rel_strs.append(s)
             graph_context.append(f"Domain relationships: {', '.join(rel_strs)}")
     if has_text_graph:
-        graph_context.append(f"Text layer with {len(text_entities)} entity types: {', '.join(text_entities[:5])}")
+        text_props = _get_text_entity_properties(state)
+        if text_props:
+            lines = [f"Text layer with {len(text_entities)} entity types (all carry __Entity__ label):"]
+            for entity in text_entities:
+                info = text_props.get(entity)
+                if info and info.get("properties"):
+                    prop_parts = []
+                    for pname, pinfo in info["properties"].items():
+                        sample = pinfo.get("sample", "")
+                        if sample:
+                            prop_parts.append(f'{pname} (e.g. "{sample}")')
+                        else:
+                            prop_parts.append(pname)
+                    lines.append(f"  {entity} [{', '.join(prop_parts)}]")
+                else:
+                    lines.append(f"  {entity}")
+            graph_context.append("\n".join(lines))
+        else:
+            graph_context.append(f"Text layer with {len(text_entities)} entity types: {', '.join(text_entities[:5])}")
         if text_rels:
             rel_strs = [f"{r['type']} ({r['from']} -> {r['to']})" for r in text_rels]
             graph_context.append(f"Text relationships: {', '.join(rel_strs)}")
@@ -158,6 +203,26 @@ async def _select_retrieval_strategy(
 
     graph_summary = "\n".join(graph_context)
 
+    # Build dual-layer architecture context (only when both layers exist)
+    architecture_block = ""
+    if has_domain_graph and has_text_graph:
+        arch_lines = [
+            "",
+            "DUAL-LAYER ARCHITECTURE:",
+            "This graph has two separate node populations that share some labels.",
+            "Text-extracted nodes (from unstructured data) carry the `__Entity__` label.",
+            "Domain nodes (from structured data) do NOT have the `__Entity__` label.",
+            "The `CORRESPONDS_TO` relationship bridges text entities to domain entities.",
+        ]
+        # Show which labels overlap between layers
+        overlap = set(domain_labels) & set(text_entities)
+        if overlap:
+            arch_lines.append(f"Overlapping labels (exist in BOTH layers as separate nodes): {', '.join(sorted(overlap))}")
+        arch_lines.append("Cross-layer Cypher pattern: MATCH (t:__Entity__:Label)-[:CORRESPONDS_TO]->(d:Label)")
+        architecture_block = "\n".join(arch_lines)
+
+    graph_summary = graph_summary + architecture_block
+
     # Build system prompt for Claude
     system_prompt = f"""You are a knowledge graph query strategy selector.
 
@@ -171,11 +236,14 @@ Available strategies:
    - Use when: User asks about graph structure, available entities, or "what's in the graph"
 
 2. **cypher**: Execute structured Cypher queries
-   - Use when: Question is a Cypher query OR requires precise graph traversal
+   - Use when: Question is a Cypher query OR requires precise graph traversal,
+     counting, ranking, or aggregation — including across layers
    - CRITICAL: Only suggest Cypher if you can generate a SAFE, READ-ONLY query
    - Blocked keywords: CREATE, DELETE, SET, REMOVE, MERGE
    - Required keywords: MATCH or RETURN
-   - Do NOT use cypher when the question spans both domain and text layers — use cross_layer instead
+   - For cross-layer aggregation (counting, ranking, comparing data across domain and text
+     layers), generate Cypher that bridges via `CORRESPONDS_TO` and uses `__Entity__` to
+     distinguish text-extracted nodes from domain nodes
 
 3. **vector**: Semantic similarity search on text chunks
    - Use when: Question is about content/meaning in unstructured text
@@ -186,16 +254,15 @@ Available strategies:
    - Requires: Text layer available
 
 5. **cross_layer**: Hybrid search (vector + fulltext) + entity traversal across layers
-   - This is the ONLY strategy that can bridge domain and text layers
-   - Use when: Question links text content to structured domain entities, or asks about
-     extracted entities (customers, quality issues, product features) alongside domain data
+   - Use when: Question asks for text content linked to domain entities — retrieval,
+     not aggregation (e.g. "what do reviews say about product X?")
    - ALSO use when: Question contains specific names, @mentions, or keywords that need
      exact matching AND you need entity/domain context (e.g. "reviews by @home_chef")
    - Requires: Both domain AND text layers available
    - Traverses: FROM_CHUNK (text entities to chunks) + CORRESPONDS_TO (text to domain entities)
-   - Example: "Which suppliers are mentioned in quality reviews?"
-   - Example: "What quality issues are linked to specific products?"
-   - Example: "What did @home_chef say about the furniture?"
+   - Do NOT use for counting, ranking, or aggregation — use cypher instead
+
+IMPORTANT: Cypher has no GROUP BY — aggregation is implicit in WITH/RETURN.
 
 Respond with JSON only (no markdown):
 {{
@@ -305,6 +372,13 @@ def _execute_schema_query(driver: Driver, state: dict) -> dict:
             record = prop_result.single()
             properties[label] = sorted(record["props"]) if record else []
 
+    # Build relationship endpoint lookup from state
+    domain_rels = _get_domain_relationships(state)
+    text_rels = _get_text_relationships(state)
+    rel_endpoint_map = {}
+    for r in domain_rels + text_rels:
+        rel_endpoint_map[r["type"]] = r
+
     # Classify labels
     domain_found = [l for l in all_labels if l in domain_labels]
     text_found = [l for l in all_labels if l in text_labels]
@@ -337,7 +411,14 @@ def _execute_schema_query(driver: Driver, state: dict) -> dict:
     if all_rels:
         lines.append("## Relationships")
         for rel in all_rels:
-            lines.append(f"  - {rel}")
+            info = rel_endpoint_map.get(rel)
+            if info:
+                s = f"  - {rel}: {info['from']} -> {info['to']}"
+                if info.get("properties"):
+                    s += f" [{', '.join(info['properties'])}]"
+                lines.append(s)
+            else:
+                lines.append(f"  - {rel}")
 
     answer = "\n".join(lines)
 
@@ -348,6 +429,7 @@ def _execute_schema_query(driver: Driver, state: dict) -> dict:
             "domain_labels": domain_found,
             "text_labels": text_found,
             "relationships": all_rels,
+            "relationship_endpoints": rel_endpoint_map,
             "node_counts": counts,
             "properties": properties
         }
@@ -408,6 +490,147 @@ def _execute_cypher(driver: Driver, query: str) -> dict:
         "confidence": confidence,
         "details": {"strategy": "cypher", "query": query, "result_count": len(records)}
     }
+
+
+# =============================================================================
+# Cross-Layer Cypher Validation + Guided Regeneration
+# =============================================================================
+
+@traceable(name="query.regenerate_cross_layer_cypher")
+async def _regenerate_cross_layer_cypher(
+    question: str,
+    failed_cypher: str,
+    violation: dict,
+    state: dict
+) -> str:
+    """Regenerate a cross-layer Cypher query with CORRESPONDS_TO bridge.
+
+    Called when _detect_cross_layer_violation finds a query that spans both
+    domain and text layers without the bridge relationship.
+
+    Args:
+        question: Original natural language question
+        failed_cypher: The Cypher that violated cross-layer rules
+        violation: Dict from _detect_cross_layer_violation with details
+        state: Pipeline state for schema context
+
+    Returns:
+        Corrected Cypher query string
+
+    Raises:
+        ValueError: If corrected query fails read-only validation
+    """
+    domain_rels = _get_domain_relationships(state)
+    text_rels = _get_text_relationships(state)
+    domain_labels = _get_domain_labels(state)
+    text_entities = _get_text_entities(state)
+
+    domain_schema = "\n".join(
+        f"  ({r['from']})-[:{r['type']}]->({r['to']})" for r in domain_rels
+    )
+    text_schema = "\n".join(
+        f"  ({r['from']})-[:{r['type']}]->({r['to']})" for r in text_rels
+    )
+
+    overlapping = sorted(violation.get("overlapping_labels", set()))
+
+    system_prompt = f"""You are a Cypher query repair assistant for a dual-layer knowledge graph.
+
+FAILED QUERY:
+{failed_cypher}
+
+WHY IT FAILS:
+{violation['message']}
+Domain and text layers have SEPARATE node populations. Nodes with the same label
+(e.g. Product) in different layers are NOT the same nodes. You must bridge them
+with the CORRESPONDS_TO relationship.
+
+DOMAIN LAYER (from structured CSV data):
+  Node labels: {', '.join(domain_labels)}
+  Relationships:
+{domain_schema}
+
+TEXT LAYER (from unstructured text, all entities carry __Entity__ label):
+  Entity labels: {', '.join(text_entities)}
+  Relationships:
+{text_schema}
+{_format_text_entity_props_block(state)}
+OVERLAPPING LABELS (exist in BOTH layers as separate nodes): {', '.join(overlapping) if overlapping else 'none'}
+
+BRIDGE PATTERN:
+  Text entity to domain entity: (t:__Entity__:Label)-[:CORRESPONDS_TO]->(d:Label)
+  Text entity to chunk: (entity)-[:FROM_CHUNK]->(chunk:Chunk)
+
+IMPORTANT: Cypher has no GROUP BY — aggregation is implicit in WITH/RETURN.
+
+INSTRUCTIONS:
+- Rewrite the query to use CORRESPONDS_TO to bridge between layers
+- Use __Entity__ label to distinguish text-extracted nodes from domain nodes
+- Return ONLY the corrected Cypher query, no explanation
+- The query must be read-only (no CREATE, DELETE, SET, REMOVE, MERGE)
+
+QUESTION: {question}"""
+
+    import anthropic
+    client = wrap_anthropic(anthropic.Anthropic())
+
+    response = client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=1024,
+        system=system_prompt,
+        messages=[{"role": "user", "content": "Rewrite the query with the CORRESPONDS_TO bridge."}]
+    )
+
+    corrected = response.content[0].text.strip()
+
+    # Strip markdown code blocks if present
+    if "```cypher" in corrected:
+        corrected = corrected.split("```cypher")[1].split("```")[0].strip()
+    elif "```" in corrected:
+        corrected = corrected.split("```")[1].split("```")[0].strip()
+
+    _validate_read_only_cypher(corrected)
+    return corrected
+
+
+@traceable(name="query.execute_validated_cypher")
+async def _execute_validated_cypher(
+    driver: Driver,
+    cypher_query: str,
+    question: str,
+    state: dict
+) -> tuple[dict, str]:
+    """Execute Cypher with cross-layer validation and guided regeneration.
+
+    Single entry point for cypher execution. Detects cross-layer violations
+    and attempts one regeneration before falling back to the original query.
+
+    Args:
+        driver: Neo4j driver instance
+        cypher_query: Original Cypher query
+        question: Original natural language question
+        state: Pipeline state for layer classification
+
+    Returns:
+        (result_dict, correction_note) — correction_note is empty string
+        if no violation, or describes the correction if regeneration fired.
+    """
+    violation = _detect_cross_layer_violation(cypher_query, state)
+
+    correction_note = ""
+    if violation:
+        try:
+            corrected = await _regenerate_cross_layer_cypher(
+                question, cypher_query, violation, state
+            )
+            correction_note = violation["message"]
+            cypher_query = corrected
+        except Exception:
+            # Regeneration failed — proceed with original query
+            pass
+
+    result = _execute_cypher(driver, cypher_query)
+    return result, correction_note
 
 
 # =============================================================================
@@ -548,8 +771,8 @@ def _execute_hybrid_search(driver: Driver, question: str, top_k: int = 5) -> dic
             embedder=embedder
         )
 
-        # Execute search
-        search_result = retriever.search(query_text=question, top_k=top_k)
+        # Execute search (escape Lucene special chars for fulltext index)
+        search_result = retriever.search(query_text=_escape_lucene(question), top_k=top_k)
 
     except Exception as e:
         error_msg = str(e)
@@ -705,8 +928,9 @@ def _execute_cross_layer_traversal(
         )
 
         # Execute search with entity labels as parameter
+        # (escape Lucene special chars for fulltext index)
         search_result = retriever.search(
-            query_text=question,
+            query_text=_escape_lucene(question),
             top_k=top_k,
             query_params={"entity_labels": entity_labels}
         )

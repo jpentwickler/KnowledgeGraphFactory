@@ -17,6 +17,13 @@ import pytest
 from unittest.mock import patch, MagicMock
 
 
+@pytest.fixture(autouse=True)
+def _bypass_project_guard():
+    """Bypass _check_project_active for all tests in this module."""
+    with patch("mcp_server.server._check_project_active", return_value=None):
+        yield
+
+
 # =============================================================================
 # Fixtures
 # =============================================================================

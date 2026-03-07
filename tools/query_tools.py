@@ -8,8 +8,24 @@ Provides utilities for:
 - Cypher safety validation
 """
 
+import logging
+import re
 from typing import Any
 from core.state import get_approved, has_approved
+
+logger = logging.getLogger(__name__)
+
+
+_LUCENE_SPECIAL = set(r'+-&|!(){}[]^"~*?:\/')
+
+
+def _escape_lucene(text: str) -> str:
+    """Escape Lucene special characters for fulltext index queries.
+
+    Neo4j fulltext indexes use Apache Lucene. Unescaped special characters
+    in natural language queries cause parse errors.
+    """
+    return "".join(f"\\{c}" if c in _LUCENE_SPECIAL else c for c in text)
 
 
 def _get_domain_labels(state: dict) -> list[str]:
@@ -102,7 +118,7 @@ def _get_text_relationships(state: dict) -> list[dict]:
         state: Pipeline state dictionary
 
     Returns:
-        List of {"type": "has_issue", "from": "Product", "to": "QualityIssue"}
+        List of {"type": "EVALUATES", "from": "Review", "to": "Product"}
     """
     fact_types = get_approved(state, "fact_types")
     if not fact_types:
@@ -112,7 +128,7 @@ def _get_text_relationships(state: dict) -> list[dict]:
     for value in fact_types.values():
         if isinstance(value, dict):
             rels.append({
-                "type": value.get("predicate_label", ""),
+                "type": value.get("predicate_label", "").upper(),
                 "from": value.get("subject_label", ""),
                 "to": value.get("object_label", ""),
             })
@@ -329,3 +345,160 @@ def _validate_read_only_cypher(cypher: str) -> None:
         raise ValueError(
             "Invalid Cypher query. Must contain at least one of: MATCH, RETURN"
         )
+
+
+def _get_text_entity_properties(state: dict) -> dict:
+    """Return text entity schema from state.
+
+    Mirrors _get_domain_node_properties() for the text layer.
+
+    Args:
+        state: Pipeline state dictionary
+
+    Returns:
+        Dict mapping entity labels to their properties and sample values,
+        or empty dict if not available.
+    """
+    return state.get("text_entity_schema", {})
+
+
+def _introspect_text_schema(driver, state: dict) -> dict:
+    """Sample text entity properties from the graph and store in state.
+
+    For each label in approved_entity_types, queries one __Entity__ node
+    to discover property names and sample values. Skips infrastructure
+    labels and filters out embedding and __-prefixed properties.
+
+    Args:
+        driver: Neo4j driver instance
+        state: Pipeline state dictionary (modified in place)
+
+    Returns:
+        The text_entity_schema dict (also stored in state)
+    """
+    _SKIP_LABELS = {"__KGBuilder__", "__Entity__", "Chunk", "Document"}
+
+    entity_types = get_approved(state, "entity_types")
+    if not entity_types:
+        state["text_entity_schema"] = {}
+        return {}
+
+    labels = [
+        name for name, value in entity_types.items()
+        if isinstance(value, dict) and name not in _SKIP_LABELS
+    ]
+
+    schema = {}
+    try:
+        with driver.session() as session:
+            for label in labels:
+                result = session.run(
+                    f"MATCH (n:`{label}`) WHERE n:`__Entity__` "
+                    f"RETURN keys(n) AS props, n LIMIT 1"
+                )
+                record = result.single()
+                if not record:
+                    continue
+
+                raw_props = record["props"]
+                node = record["n"]
+
+                properties = {}
+                for prop in raw_props:
+                    if prop == "embedding" or prop.startswith("__"):
+                        continue
+                    value = node[prop]
+                    sample = str(value) if value is not None else ""
+                    if len(sample) > 100:
+                        sample = sample[:100]
+                    properties[prop] = {"sample": sample}
+
+                if properties:
+                    schema[label] = {"properties": properties}
+    except Exception as e:
+        logger.warning("Text schema introspection failed: %s", e)
+        state["text_entity_schema"] = {}
+        return {}
+
+    state["text_entity_schema"] = schema
+    return schema
+
+
+def _get_layer_classification(state: dict) -> dict:
+    """Classify graph layers from state into domain and text sets.
+
+    Returns:
+        {
+            "domain_labels": set,
+            "domain_rel_types": set,
+            "text_labels": set,
+            "text_rel_types": set,
+            "overlapping_labels": set,
+        }
+    """
+    domain_labels = set(_get_domain_labels(state))
+    domain_rels = _get_domain_relationships(state)
+    domain_rel_types = {r["type"] for r in domain_rels}
+
+    text_labels = set(_get_text_entities(state))
+    text_rels = _get_text_relationships(state)
+    text_rel_types = {r["type"] for r in text_rels}
+
+    overlapping_labels = domain_labels & text_labels
+
+    return {
+        "domain_labels": domain_labels,
+        "domain_rel_types": domain_rel_types,
+        "text_labels": text_labels,
+        "text_rel_types": text_rel_types,
+        "overlapping_labels": overlapping_labels,
+    }
+
+
+def _detect_cross_layer_violation(cypher: str, state: dict) -> dict | None:
+    """Detect if a Cypher query spans both layers without CORRESPONDS_TO bridge.
+
+    Returns None if query is valid (single-layer or properly bridged).
+    Returns violation dict if cross-layer without bridge.
+    """
+    classification = _get_layer_classification(state)
+    domain_rel_types = classification["domain_rel_types"]
+    text_rel_types = classification["text_rel_types"]
+
+    # Single-layer graph: no cross-layer violation possible
+    if not domain_rel_types or not text_rel_types:
+        return None
+
+    # Extract relationship types from Cypher via regex
+    # Handles [:TYPE], [r:TYPE], [:TYPE1|TYPE2]
+    raw_matches = re.findall(r'\[(?:\w+)?:\s*([^\]]+)\]', cypher)
+    used_rels = set()
+    for match in raw_matches:
+        for rel_type in match.split('|'):
+            cleaned = rel_type.strip()
+            if cleaned and cleaned.replace('_', '').isalnum():
+                used_rels.add(cleaned)
+
+    if not used_rels:
+        return None
+
+    domain_used = used_rels & domain_rel_types
+    text_used = used_rels & text_rel_types
+
+    # Not cross-layer if only one side is used
+    if not domain_used or not text_used:
+        return None
+
+    # Bridge is present — no violation
+    if "CORRESPONDS_TO" in used_rels:
+        return None
+
+    return {
+        "domain_rels_used": domain_used,
+        "text_rels_used": text_used,
+        "overlapping_labels": classification["overlapping_labels"],
+        "message": (
+            f"Cross-layer Cypher uses domain rels {sorted(domain_used)} "
+            f"and text rels {sorted(text_used)} without CORRESPONDS_TO bridge"
+        ),
+    }

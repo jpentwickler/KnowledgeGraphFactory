@@ -1,0 +1,11 @@
+# Minimal dependencies for query-only Docker image.
+# Does NOT include pandas, rapidfuzz, pytest (not needed for read-only queries).
+
+anthropic>=0.40.0
+python-dotenv>=1.0.0
+fastmcp>=2.3,<3
+uvicorn>=0.30.0
+neo4j>=5.0.0
+neo4j-graphrag>=1.0.0
+openai>=1.0.0
+langsmith>=0.3.0

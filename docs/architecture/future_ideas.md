@@ -102,24 +102,90 @@ merge and industrial-mode multi-domain production.
 
 ---
 
-### Priority 3: Embedding-Based Entity Resolution
+### ~~Priority 3: Embedding-Based Entity Resolution~~ — Attempted, Reverted
 
 **Source**: Adamchic's Fixed Entity Architecture (FEA) research
 
-**What**: Replace rapidfuzz + Jaro-Winkler string matching in
-`pipelines/entity_resolution.py` with cosine similarity between entity
-embeddings for `CORRESPONDS_TO` resolution.
+**What was tried**: Replace rapidfuzz + Jaro-Winkler string matching in
+`pipelines/entity_resolution.py` with cosine similarity between serialized
+node embeddings (OpenAI `text-embedding-3-large`) for `CORRESPONDS_TO`
+resolution.
 
-**Why**: String matching fails on semantic equivalences ("drawer hardware" vs
-"Drawer Rails"). For industrial mode, entity resolution must work without
-human review of candidates. Embedding similarity is more reliable unattended.
+**Why it was reverted**: Embedding similarity on full serialized node text
+degraded resolution quality compared to Jaro-Winkler on the name field alone.
+The root problem is property richness asymmetry: domain nodes (from CSV) have
+many clean properties (product_id, price, description), while subject graph
+entities (extracted by GPT-4o from reviews) often have only a name and a
+short description. Embedding the full node text means the domain node's rich
+property set pulls its vector away from the sparse entity vector, even when
+the names are identical. String matching on the name key is immune to this
+asymmetry. Reverted in commit `081a6c7` (Feb 25 2026).
 
-**Scope**: ~100 lines in entity resolution path. Reuse existing OpenAI
-embeddings infrastructure from `text_builder.py`.
+**Current approach** (`pipelines/entity_resolution.py`):
+1. `rapidfuzz.fuzz.ratio` to find the best `(entity_key, domain_key)` pair
+   per label (e.g., `name` ↔ `product_name`)
+2. `apoc.text.jaroWinklerDistance` in Cypher to match values at similarity
+   ≥ `JAROWINKLER_AUTO_RESOLVE = 0.90`
+3. `0.70–0.90` zone surfaced as human-review candidates via
+   `proposed_resolution_candidates` in state
+
+**Status**: Closed. Jaro-Winkler on the name key is the correct approach for
+this data shape. Embedding-based resolution would only make sense if entity
+nodes were consistently rich enough to produce stable, comparable embeddings —
+which requires a different extraction strategy (e.g., extracting structured
+properties rather than free-text descriptions per entity).
 
 ---
 
-### Priority 4: Context-Aware Per-File Processing + Bin-Packing
+### Priority 3: Post-Build Graph Hygiene Filtering
+
+**What**: Two Cypher passes run automatically at the end of `build_text_graph()`:
+
+1. Remove orphan entity nodes — extracted by GPT-4o but connected to no
+   relationships (pure noise with no query value)
+2. Remove entities with meaningless names — pure numbers, single non-alphabetic
+   characters, stopwords ("the", "n/a", "etc.", "various")
+
+**Why**: Baseline text graph quality. There is no scenario where keeping orphan
+nodes or garbage names is desirable. Running this by default means extraction
+noise is cleaned before entity resolution, consolidation, and query all run on
+the graph. Smallest possible effort, immediate impact.
+
+**Scope**: New `pipelines/hygiene.py` with `remove_orphan_entities(driver)`,
+`remove_meaningless_entities(driver)`, and `run_hygiene(driver, state)`.
+Exposed as `scope="hygiene"` on `kg_build_graph` and run automatically as the
+final step of `scope="unstructured"`. See Idea 13 for full implementation
+detail.
+
+**Effort**: Very low. ~60 lines, no new dependencies, ~8 unit tests.
+
+---
+
+### Priority 4: Intra-Graph Entity Description Consolidation
+
+**What**: After `build_text_graph()`, find entity nodes merged from multiple
+chunks, collect all descriptions GPT-4o assigned them across chunks, and make
+one batch LLM call (20 entities per call) to produce a single consolidated
+description per entity. Write the merged description back to `e.description`.
+
+**Why**: `ON MATCH SET e.description = $new_description` silently overwrites
+every prior description — only the last-seen chunk's version survives. For
+entities that appear across many chunks (recurring part names, defect types,
+product names), the surviving description is thin and often missing the most
+diagnostically useful facts. Entity nodes are the cross-layer bridges via
+`CORRESPONDS_TO` — a weak description degrades all cross-layer retrieval
+through that node.
+
+**Scope**: New `pipelines/consolidation.py` with `find_multi_chunk_entities()`,
+`consolidate_batch()`, and `consolidate_entities()`. Exposed as
+`scope="consolidate"` on `kg_build_graph`. See Idea 11 for full implementation
+detail including the detection query and batch prompt design.
+
+**Effort**: Low-Medium. ~150 lines, ~15 unit tests.
+
+---
+
+### Priority 5: Context-Aware Per-File Processing + Bin-Packing
 
 **Source**: Extraction Quality Roadmap Phase 3 (`11_extraction_quality_roadmap.md`)
 
@@ -136,7 +202,7 @@ loses context and wastes API calls. This is a scaling prerequisite.
 
 ---
 
-### Priority 5: Second Real Use Case
+### Priority 6: Second Real Use Case
 
 Build a KG for a domain you actually care about. Validate Priorities 1-4 with
 real data. The approved schema from this use case becomes the first entry in
@@ -149,7 +215,37 @@ the schema template library.
 The transition from exploration tool to production system. These items create
 the "industrial mode" that runs without conversation.
 
-### Priority 6: Schema Template Library
+### Priority 7: GraphRAG Community Summaries for Global Query Answering
+
+**What**: After `build_text_graph()`, run the Louvain algorithm (via Neo4j GDS)
+on the text layer to assign a `community_id` property to each `Chunk` and
+`__Entity__` node. For each community, generate one LLM summary capturing the
+thematic content of its member chunks. Store summaries as `CommunitySummary`
+nodes connected to member chunks (`SUMMARIZES`), member entities (`REPRESENTS`),
+and reachable domain nodes (`COVERS`).
+
+**Why**: The current `kg_query` tool answers local questions — what a specific
+chunk says about a topic. An entire class of CQs returns `not_answerable`:
+global and thematic questions ("What are the main quality risks across all
+products?", "Are our defects supplier-linked or design-linked?"). Community
+summaries are pre-computed answers to this class. They require no additional
+LLM call at query time — vector search hits the summary nodes directly.
+One LLM call per community at build time unlocks an entirely new query
+capability.
+
+**Scope**: New `pipelines/community_builder.py`. New `community` retrieval
+strategy in `query_builder.py`. Exposed as `scope="communities"` on
+`kg_build_graph`. See Idea 10 for full implementation detail including the
+furniture domain simulation, Cypher wiring, and cross-layer traversal path.
+
+**Dependencies**: Neo4j GDS plugin (available in Community, Enterprise, and
+Aura). No new Python dependencies.
+
+**Effort**: Medium. ~300 lines, ~20 unit tests.
+
+---
+
+### Priority 8: Schema Template Library
 
 **Concept**: Extract reusable schema templates from completed KGs. A template
 captures the approved artifacts from a domain that's been through exploration:
@@ -172,7 +268,7 @@ A new project picks a template, applies customizations, and runs the pipeline.
 every new project rediscovers what supply chains have Products, Parts, and
 Suppliers. With templates, that knowledge is captured once and reused.
 
-**Trigger**: After completing Priority 5 (second real use case). Two completed
+**Trigger**: After completing Priority 6 (second real use case). Two completed
 domains give you the first two templates and reveal which parts generalize.
 
 **Scope**: Template format definition, export function from state to template,
@@ -180,7 +276,7 @@ import function from template to state, CLI or API entry point.
 
 ---
 
-### Priority 7: Headless Pipeline Runner
+### Priority 9: Headless Pipeline Runner
 
 **Concept**: A single function that takes config + data and produces a KG
 without any agent conversation:
@@ -205,7 +301,7 @@ template, not from a conversation.
 orchestrator. No MCP, no Claude Code, no human approval. The human approved
 the template; the pipeline applies it.
 
-**Trigger**: After Priority 6 (schema templates exist). The pipeline runner
+**Trigger**: After Priority 8 (schema templates exist). The pipeline runner
 consumes templates.
 
 **Scope**: New `pipelines/headless_runner.py`. Orchestrates existing builders.
@@ -214,7 +310,7 @@ build report.
 
 ---
 
-### Priority 8: Automated Quality Gate
+### Priority 10: Automated Quality Gate
 
 **Concept**: After headless build, automatically run CQ evaluation and fail
 the build if coverage score drops below a threshold. This replaces human
@@ -237,7 +333,7 @@ if eval_result["coverage_score"] < config.min_coverage:
 inspect every graph. CQ evaluation already exists (US014) -- this wraps it
 as a build gate.
 
-**Trigger**: After Priority 7 (headless runner exists).
+**Trigger**: After Priority 9 (headless runner exists).
 
 **Scope**: Small. Integration of existing `_run_cq_evaluation()` into the
 headless pipeline with threshold configuration.
@@ -249,7 +345,7 @@ headless pipeline with threshold configuration.
 The query layer is the API contract for domain-specific agents. It must be
 reliable, fast, and structured for agent consumption.
 
-### Priority 9: Structured Query Results for Domain Agents
+### Priority 11: Structured Query Results for Domain Agents
 
 **Concept**: Domain agents need structured data, not just text chunks. Add a
 query mode that returns entities, properties, paths, and aggregates as JSON:
@@ -284,7 +380,7 @@ parameter in kg_query / query_server.
 
 ---
 
-### Priority 10: Deterministic Strategy Selection
+### Priority 12: Deterministic Strategy Selection
 
 **Concept**: Replace Claude-based strategy selection with rule-based selection
 grounded in retrieval hints (computed from data characteristics after build).
@@ -313,7 +409,7 @@ a conversation with an end user and can't wait for strategy selection.
 
 ---
 
-### Priority 11: Production Query Server
+### Priority 13: Production Query Server
 
 **Concept**: Evolve `query_server.py` from a dev tool (2 MCP tools,
 in-memory sessions) into a production service:
@@ -340,7 +436,7 @@ realized. Some groundwork exists in `docs/architecture/12_remote_query_distribut
 
 Building multiple domain KGs and composing them into a unified knowledge base.
 
-### Priority 12: Multi-Use-Case Merge Tool (kg_merge)
+### Priority 14: Multi-Use-Case Merge Tool (kg_merge)
 
 **Source**: `09_multi_use_case_integration.md`
 
@@ -362,7 +458,7 @@ interaction for conflict resolution.
 
 ---
 
-### Priority 13: Schema Template Inheritance
+### Priority 15: Schema Template Inheritance
 
 **Concept**: Templates can extend other templates. A "retail supply chain"
 template inherits from "supply chain" and adds retail-specific types:
@@ -403,7 +499,10 @@ dependency for chunk-to-domain connectivity.
 **Trigger**: Cross-layer query recall is measurably low. CQ evaluation shows
 `partial`/`not_answerable` CQs with relevant but unreachable chunks.
 
-**Effort**: ~100 lines. Depends on Priority 3 (embedding-based resolution).
+**Effort**: ~100 lines. Note: the embedding entity resolution this originally
+depended on was attempted and reverted (see closed Priority 3). This idea can
+be implemented independently using the embedding infrastructure already present
+in `pipelines/text_builder.py`.
 
 ---
 
@@ -417,7 +516,7 @@ cardinality violations.
 
 **Trigger**: Data quality issues cause incorrect query results. Graph too
 large for manual inspection. Also valuable as part of the automated quality
-gate (Priority 8) for formal validation beyond CQ coverage.
+gate (Priority 10) for formal validation beyond CQ coverage.
 
 **Effort**: Medium. n10s + RDFLib + pySHACL. New dependency.
 
@@ -818,8 +917,8 @@ example).
 - Part C (query-time enrichment): Medium. Enrichment function in query server
   + template lookup logic. ~200 lines.
 
-**Depends on**: Priority 6 (schema templates) for materialization config.
-Priority 9 (structured query results) for the enrichment merge point.
+**Depends on**: Priority 8 (schema templates) for materialization config.
+Priority 11 (structured query results) for the enrichment merge point.
 
 **New dependencies**:
 - `databricks-sql-connector` (PyPI) -- SQL access to Databricks warehouses
@@ -840,14 +939,494 @@ Priority 9 (structured query results) for the enrichment merge point.
 
 ---
 
+### Idea 9: LLM Call Caching for Structured Output Proposals
+
+**Source**: knwler cache.py comparison, session analysis March 2026
+
+**Concept**: Cache the result of `propose_entity_types()` and
+`propose_fact_types()` to disk, keyed on a hash of the inputs (model, system
+prompt, user message). A cache hit returns the stored JSON instantly with zero
+API calls.
+
+**Why it is NOT relevant for the current interactive workflow**:
+
+The state persistence mechanism already serves this purpose. `propose_entity_types()`
+only runs on the first call — when there is no conversation and no proposal in
+state. The moment it runs, the result is stored in `state["proposed_entity_types"]`
+and persisted to `current_state.json`. On the next session, state is reloaded
+and the proposal is already there. The expensive structured output call never
+fires again.
+
+Iteration after the first call goes through the agent loop (small
+conversational turns, ~1–2K tokens each), not through another structured
+output call on the full file content. The 15K-token call happens exactly once
+per project in normal usage.
+
+**When it would become relevant**: The industrial mode (Priority 7) — a
+headless pipeline running nightly in CI/CD on the same corpus. If the source
+files haven't changed since the last run, re-running the pipeline should not
+re-call Claude for proposals. The cache key (hash of file content + goal +
+CQs) would detect this automatically.
+
+**Trigger**: Priority 7 (headless pipeline runner) is implemented and the
+pipeline runs repeatedly on stable corpora.
+
+**Effort**: Low. `diskcache` library, ~20 lines wrapping `propose_entity_types`
+and `propose_fact_types`, cache stored alongside `current_state.json`.
+
+---
+
+### Idea 10: GraphRAG Community Summaries for Global Query Answering
+
+**Status**: Promoted to Phase B as Priority 7. Full detail retained here.
+
+**Source**: Microsoft GraphRAG (2024–2025), session analysis March 2026
+
+**Why this is distinct from Idea 3**: Idea 3 (Domain Partitioning) uses
+community detection to *partition* the graph into domains for performance —
+reducing context dilution when the schema exceeds ~50 node types. That is a
+query-time optimization.
+
+This idea uses community detection to *generate pre-computed summary nodes*
+that answer a class of questions the current query layer cannot handle at all:
+global, thematic, cross-document questions.
+
+**The gap it fills**: The current `kg_query` tool answers local questions —
+"what does chunk X say about topic Y?" Competency questions like "What are the
+main quality themes across all products?" or "Are our defects supplier-linked
+or design-linked?" consistently return `not_answerable` in CQ evaluation
+because they require synthesizing across the entire corpus, not retrieving a
+single chunk.
+
+**Concept**:
+
+After `build_text_graph()`, run Louvain on the text layer graph. Louvain
+assigns a `community_id` integer property to each `Chunk` and `__Entity__`
+node based on the density of `NEXT_CHUNK` (within-file chains) and
+`FROM_CHUNK` (entity-to-chunk) edges. Cross-document bridges form where entity
+nodes are shared across multiple review files.
+
+For each community, collect all member chunk texts and send them in one LLM
+call asking for a concise thematic summary. Store the result as a new node
+type and wire it into the graph:
+
+```cypher
+// Step 1: GDS projection + Louvain
+CALL gds.louvain.write('textGraphProjection', {writeProperty: 'community_id'})
+
+// Step 2: Per community — create summary node
+CREATE (cs:CommunitySummary {
+    community_id: 0,
+    label: "Drawer Hardware Defects",
+    summary: "The Helsingborg Dresser is the primary quality failure...",
+    severity: "critical",
+    member_count: 14
+})
+
+// Step 3: Wire to member chunks
+MATCH (chunk:Chunk {community_id: 0})
+CREATE (cs)-[:SUMMARIZES]->(chunk)
+
+// Step 4: Wire to member entities
+MATCH (e:__Entity__ {community_id: 0})
+CREATE (cs)-[:REPRESENTS]->(e)
+
+// Step 5: Wire to domain nodes reachable via CORRESPONDS_TO
+MATCH (cs)-[:SUMMARIZES]->(chunk)<-[:FROM_CHUNK]-(e)-[:CORRESPONDS_TO]->(domain)
+MERGE (cs)-[:COVERS]->(domain)
+```
+
+**What this produces for the furniture domain** (simulated from data):
+
+| Community | Label | Products Covered | Severity |
+|---|---|---|---|
+| A | Drawer Hardware Defects | Helsingborg Dresser, Norrköping Nightstand | critical |
+| B | Assembly Process Failures | Gothenburg Table, Malmö Desk, Västerås Bookshelf | high |
+| C | Material Durability Concerns | Uppsala Sofa, Jönköping Coffee Table | medium |
+| D | Scandinavian Design Strengths | Stockholm Chair, Örebro Lamp, Linköping Bed | low |
+| E | Cross-product Assembly Experience | multiple | medium |
+
+**Queries that become answerable**:
+
+- "What are our biggest product quality risks?" → vector search hits
+  `CommunitySummary` nodes, returns structured thematic clusters ranked by
+  severity
+- "Are our defects supplier-linked or design-linked?" → Community A summary
+  mentions "customer service acknowledged supplier issue"; Community B says
+  "manufacturing precision failures, not design problems" — the LLM embedded
+  this distinction during summarization
+- "Which products are safe to promote right now?" → Community D (Strong
+  Performers) answers directly
+
+**Full traversal path unlocked**:
+
+```
+CommunitySummary -[:COVERS]-> Product -[:HAS_ASSEMBLY]-> Assembly
+    -[:CONTAINS_PART]-> Part <-[:SUPPLIES]- Supplier
+```
+
+A thematic quality cluster connects all the way to specific suppliers in one
+Cypher traversal. No LLM hop required.
+
+**Important caveat**: The `:COVERS` → domain path depends on `CORRESPONDS_TO`
+links existing. Sparse entity resolution means sparse community-to-domain
+connections. Community summaries are most powerful after entity resolution is
+healthy.
+
+**Implementation**:
+
+New `pipelines/community_builder.py`:
+- `project_text_graph(driver)` — GDS in-memory projection of Chunk +
+  __Entity__ nodes and their edges
+- `run_louvain(driver)` — write `community_id` property back to nodes
+- `summarize_community(community_id, chunks, state)` — single Claude API
+  call per community, returns label + summary + severity
+- `build_community_summaries(driver, state)` — orchestrates all steps,
+  creates nodes and edges
+- Exposed via new `scope="communities"` on `kg_build_graph` MCP tool
+
+New query strategy `community` in `query_builder.py`:
+- Vector search on `CommunitySummary.summary` text
+- Falls back to current strategies for local questions
+
+**Trigger**: CQ evaluation shows `not_answerable` results for thematic or
+global questions. Also valuable as a standalone reporting feature — running
+`kg_build_graph(scope="communities")` produces a structured quality report
+from any text corpus without writing any Cypher.
+
+**Dependencies**: Neo4j GDS plugin (for Louvain). GDS is available in Neo4j
+Community, Enterprise, and Aura. No new Python dependencies.
+
+**Effort**: Medium. ~300 lines across new pipeline + query strategy + MCP
+wiring. ~20 unit tests.
+
+---
+
+### Idea 11: Intra-Graph Entity Description Consolidation
+
+**Status**: Promoted to Phase A as Priority 4. Full detail retained here.
+
+**Source**: knwler `consolidation.py` comparison, session analysis March 2026
+
+**The problem**: `SimpleKGPipeline` processes review files chunk by chunk. GPT-4o
+extracts the same real-world entity from multiple chunks, each time writing a
+description based only on that chunk's local context. Neo4j merges them into
+one node via `MERGE (e:__Entity__ {name: $name})`, but `ON MATCH SET
+e.description = $new_description` means only the last-seen description
+survives. All earlier descriptions are silently overwritten and lost.
+
+**Concrete example** — "drawer rails" appears in 5 chunks across the
+Helsingborg Dresser and Norrköping Nightstand reviews. Each chunk produces a
+valid but partial description:
+
+| Chunk | Description written by GPT-4o |
+|---|---|
+| 12 | "Metal sliding components used in dresser assembly" |
+| 13 | "Hardware components with rough edges reported by customer" |
+| 14 | "Defective rails causing drawer misalignment and assembly failure" |
+| 15 | "Supplier-linked quality issue acknowledged by customer service" |
+| 31 | "Drawer mechanism that sticks after initial installation" |
+
+The surviving description (from chunk 31): *"Drawer mechanism that sticks
+after initial installation."* The supplier issue, defective edges, and
+assembly failure — the most diagnostically useful facts — are gone.
+
+**Why this matters beyond description quality**: Entity nodes are the
+cross-layer bridges. `CORRESPONDS_TO` links them to domain `Part` and
+`Product` nodes, and the `kg_query` vector search uses their `description`
+property as searchable text. A thin or wrong description on a heavily-linked
+entity node degrades cross-layer retrieval for all queries that traverse it.
+
+**Concept**:
+
+After `build_text_graph()`, a consolidation pass:
+
+1. Finds entity nodes that were merged from more than one chunk:
+
+```cypher
+MATCH (e:__Entity__)<-[:FROM_CHUNK]-(chunk:Chunk)
+WITH e, collect(chunk.text) AS source_texts, count(chunk) AS chunk_count
+WHERE chunk_count > 1
+RETURN e.name, e.description, source_texts, chunk_count
+ORDER BY chunk_count DESC
+```
+
+2. Batches them (20 per LLM call) and sends all known descriptions to Claude
+   with a prompt asking for one consolidated 2–3 sentence description that
+   captures all of them.
+
+3. Writes the merged description back to `e.description`.
+
+**What consolidation produces for "drawer rails"**:
+
+> *"Drawer rail hardware used in dresser and nightstand assemblies. Multiple
+> customers report defective rails with rough edges, uneven surfaces, and
+> severe misalignment causing assembly failures of 3–7 hours. Customer service
+> has acknowledged a supplier quality issue as the root cause."*
+
+This description now carries the full diagnostic picture and surfaces
+correctly for queries like "which parts have known supplier quality issues?"
+
+**Detection — two options**:
+
+Option A (no schema change): query `chunk_count` at consolidation time using
+the Cypher above. Works on existing graphs.
+
+Option B (schema change): add `source_chunk_count` property to entity nodes
+during `build_text_graph()`, increment on `ON MATCH`. Consolidation filters
+on `source_chunk_count > 1`. More efficient at scale.
+
+Option A is the right starting point — it requires no changes to the build
+pipeline.
+
+**When it matters vs. when it doesn't**:
+
+High impact on entities that appear frequently across multiple chunks — product
+names, recurring part names (drawer rails, cushion foam), defect types,
+supplier names. These are exactly the nodes that sit at the center of the
+graph and act as cross-layer bridges.
+
+Low impact on entities that appear in only one chunk — rare mentions, specific
+measurements, one-off reviewer observations. These already have the correct
+description.
+
+In the furniture graph, the top 20–30 entities by `chunk_count` capture most
+of the benefit. The rest can be left as-is.
+
+**Implementation**:
+
+New `pipelines/consolidation.py`:
+- `find_multi_chunk_entities(driver)` — Cypher query returning entities with
+  `chunk_count > 1` and their source chunk texts
+- `consolidate_batch(entities, state)` — single Claude API call per batch of
+  20, structured output mapping entity name → merged description
+- `write_consolidated_descriptions(driver, results)` — Cypher `MATCH + SET`
+  pass to update `e.description`
+- `consolidate_entities(driver, state)` — orchestrates all steps, returns
+  summary dict (entities_checked, entities_updated, batches_called)
+
+Exposed via new `scope="consolidate"` on `kg_build_graph` MCP tool, or run
+automatically as the final step of `scope="unstructured"` when the flag
+`consolidate=True` is set in state.
+
+**Cost**: One LLM call per 20 multi-chunk entities. For the furniture graph
+(~148 entities, ~30 multi-chunk), that is 2 API calls. Negligible.
+
+**Trigger**: `kg_query` cross-layer results are thin or incorrect for
+well-known entities. CQ evaluation shows `partial` for questions about
+entities that appear frequently in the source documents. Also useful as a
+routine post-build step whenever `build_text_graph()` is run on a corpus with
+overlapping entity mentions.
+
+**Effort**: Low-Medium. ~150 lines in new pipeline + MCP wiring + ~15 unit
+tests.
+
+---
+
+### Idea 12: Relation Confidence Score on Text Graph Edges
+
+**Source**: knwler extraction comparison, session analysis March 2026
+
+**The problem**: Text graph relationships extracted by GPT-4o from review prose
+are treated identically regardless of how much evidence supports them. A
+relationship mentioned in 4 separate reviews and one inferred from a vague
+half-sentence sit in the graph with equal weight. Queries traversing them have
+no way to distinguish solid extractions from noise.
+
+**Scope**: Text graph relationships only. Domain graph relationships (from CSV:
+`SUPPLIES`, `HAS_ASSEMBLY`, `CONTAINS_PART`) are deterministic and need no
+confidence scoring.
+
+**Approach — co-occurrence proxy (0 LLM calls)**:
+
+After `build_text_graph()`, count how many chunks contain both the subject and
+the object of each extracted relationship. Normalize by the total chunks
+mentioning the subject:
+
+```cypher
+MATCH (a:__Entity__)<-[:FROM_CHUNK]-(chunk:Chunk)-[:FROM_CHUNK]->(b:__Entity__)
+WITH a, b, count(chunk) AS support_chunks
+MATCH (a)<-[:FROM_CHUNK]-(all_chunks:Chunk)
+WITH a, b, support_chunks, count(all_chunks) AS subject_chunks
+SET // on the relationship between a and b
+    r.confidence = toFloat(support_chunks) / subject_chunks,
+    r.support_chunks = support_chunks
+```
+
+This is a proxy, not true extraction confidence — co-occurrence confirms
+proximity, not that GPT-4o's inferred predicate is correct. But it reliably
+separates well-evidenced extractions (4+ chunks) from single-mention noise.
+
+**What becomes possible**:
+
+- Filtered traversal: `WHERE r.confidence > 0.3` removes noise from query paths
+- Human review queue: relationships with `support_chunks = 1` surfaced for
+  spot-checking
+- Additional quality signal alongside the CQ coverage score (Priority 8)
+- Ranked cross-layer paths: weight = `r.confidence × CORRESPONDS_TO.similarity`
+
+**Important caveats**:
+
+The co-occurrence proxy cannot validate the predicate — two entities in the
+same chunk doesn't confirm the relationship GPT-4o inferred between them. True
+confidence would require GPT-4o to output a score during extraction, which
+means modifying `SimpleKGPipeline`'s extraction schema — a non-trivial change
+to a library we don't control.
+
+CQ evaluation (US014) already provides the primary quality signal. This adds
+granularity at the individual edge level, not a replacement.
+
+**Trigger**: CQ evaluation shows unexpectedly low coverage on a corpus that
+should answer well, suggesting noisy extractions are polluting traversal
+results. Or the text graph exceeds ~500 entity nodes where manual review of
+extractions is no longer feasible.
+
+**Effort**: Low. Post-build Cypher pass, no new dependencies, ~50 lines in
+a new `pipelines/consolidation.py` section or standalone helper, ~8 unit tests.
+
+---
+
+### Idea 13: Post-Build Graph Hygiene Filtering
+
+**Status**: Promoted to Phase A as Priority 3. Full detail retained here.
+
+**Source**: knwler consolidation.py comparison, session analysis March 2026
+
+**The problem**: GPT-4o extraction from review text produces noise alongside
+valid entities. Two categories of noise accumulate silently in the text graph:
+
+1. **Orphan nodes** — entity nodes with no relationships. GPT-4o extracted
+   them from a chunk but they didn't participate in any inferred relationship.
+   They consume index space and pollute schema introspection without
+   contributing to any query path.
+
+2. **Meaningless names** — entities whose names are pure numbers, single
+   non-alphabetic characters, or stopwords: "1", "x", "the", "n/a", "etc.",
+   "various". GPT-4o occasionally extracts these as entity mentions, especially
+   from list-formatted review text.
+
+Today neither category is removed. Both accumulate across every
+`build_text_graph()` run.
+
+**Concept**: Two Cypher queries run as a post-build pass after
+`build_text_graph()` completes. No LLM calls, no new dependencies.
+
+```cypher
+-- 1. Remove orphan entity nodes (no relationships of any kind)
+MATCH (e:__Entity__)
+WHERE NOT (e)--()
+DELETE e
+
+-- 2. Remove meaningless names
+MATCH (e:__Entity__)
+WHERE e.name =~ '^[0-9]+$'           -- pure numbers
+   OR e.name =~ '^[^a-zA-Z]$'        -- single non-alpha character
+   OR toLower(trim(e.name)) IN ['the', 'a', 'an', 'n/a', 'etc', 'various',
+                                 'other', 'some', 'many', 'several']
+DETACH DELETE e
+```
+
+**Why distinct from Idea 2 (SHACL)**: SHACL validates schema conformance —
+missing required properties, cardinality violations, type constraints against
+a declared ontology. Hygiene filtering is heuristic pruning of extraction
+noise using simple string and graph structure rules. No schema required,
+no RDF, no pySHACL dependency.
+
+**Implementation**: New `pipelines/hygiene.py`:
+- `remove_orphan_entities(driver)` — executes orphan deletion, returns count
+- `remove_meaningless_entities(driver, stopwords=None)` — executes name
+  filtering with a configurable stopword list, returns count
+- `run_hygiene(driver, state)` — orchestrates both passes, logs results
+
+Exposed as `scope="hygiene"` on `kg_build_graph` MCP tool, or run
+automatically as the final step of `scope="unstructured"`.
+
+**Trigger**: Available immediately. Useful on any text graph build. Should
+be a default post-build step rather than an opt-in — there is no scenario
+where keeping orphan nodes or garbage names is desirable.
+
+**Effort**: Very low. ~60 lines, no new dependencies, ~8 unit tests.
+
+---
+
+### Idea 14: Chunk Overlap in the Text Graph Builder
+
+**Source**: knwler chunking.py comparison, session analysis March 2026
+
+**The problem**: The current adaptive splitters (RegexTextSplitter,
+MarkdownSectionSplitter, ParagraphSplitter) produce non-overlapping chunks.
+When two adjacent chunks are processed independently by GPT-4o, any entity
+or relationship that spans the boundary between them — where the end of chunk
+N and the start of chunk N+1 together form a coherent statement — is invisible
+to extraction. Each chunk only sees half the sentence.
+
+**Concrete example from the furniture data**: A Helsingborg Dresser review
+paragraph split at a section boundary:
+
+```
+Chunk N (end):   "...the drawer rails felt rough to the touch.
+Chunk N+1 (start): Customer service told us it was a known issue..."
+```
+
+Processed independently, chunk N extracts a quality complaint about drawer
+rails. Chunk N+1 extracts a customer service statement about an unspecified
+issue. Neither chunk captures the causal link — that the customer service
+statement *refers to* the drawer rail complaint. With overlap, both GPT-4o
+calls see the boundary region and are more likely to extract the full
+relationship.
+
+**How knwler handles it**: Token-based overlap — each new chunk starts at
+`end - overlap_tokens` of the previous chunk. Default overlap is configurable.
+The overlapping tokens appear in both chunks, giving the model boundary context.
+
+**Why lower priority for our corpus**: Our adaptive splitters are
+structure-aware. MarkdownSectionSplitter splits at heading boundaries —
+semantically coherent break points. RegexTextSplitter splits at `---`
+dividers — also intentional boundaries. For well-structured markdown, boundary
+context loss is less severe than for prose PDFs (knwler's primary target).
+Overlap matters most for the ParagraphSplitter fallback, which splits
+arbitrary prose without structural cues.
+
+**Concept**: Add an `overlap_sentences` parameter (default: 1) to the
+adaptive splitter selection in `make_kg_pipeline()`. Apply overlap only
+when the ParagraphSplitter strategy is selected — the two structure-aware
+strategies don't need it.
+
+```python
+# In pipelines/text_builder.py
+if strategy == "paragraphs":
+    splitter = ParagraphSplitter(
+        chunk_size=config.chunk_size,
+        overlap=state.get("text_splitting", {}).get("overlap_sentences", 1)
+    )
+```
+
+User override via state:
+```python
+state["text_splitting"] = {"strategy": "paragraphs", "overlap_sentences": 2}
+```
+
+**Trigger**: CQ evaluation shows `partial` results for questions that should
+be answerable from contiguous review text. Specifically: cross-sentence
+relationships (cause → effect, complaint → resolution) are missing from the
+text graph despite being clearly stated in the source. Or the corpus contains
+long prose sections that fall through to ParagraphSplitter.
+
+**Effort**: Low-Medium. Parameter threading through `make_kg_pipeline()`,
+splitter configuration, state key documentation, ~10 unit tests. Depends on
+whether `neo4j-graphrag`'s ParagraphSplitter exposes an overlap parameter
+— if not, a custom subclass is needed (~30 additional lines).
+
+---
+
 ## Review Schedule
 
 Revisit this file after each milestone:
 
 | Milestone | Expected Priorities to Review |
 |-----------|-------------------------------|
-| After Priority 4 (per-file context) | Confirm Phase A complete, plan Phase B |
-| After Priority 5 (second use case) | Start Priority 6 (schema templates) |
+| After Priority 5 (per-file context) | Confirm Phase A complete, plan Phase B |
+| After Priority 6 (second use case) | Start Priority 8 (schema templates) |
 | After first headless pipeline run | Evaluate query layer needs (Phase C) |
 | After first multi-use-case merge | Evaluate scaling needs (Phase D) |
 | After first domain agent deployed | Review all future ideas for relevance |

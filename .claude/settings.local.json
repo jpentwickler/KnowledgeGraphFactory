@@ -34,7 +34,8 @@
       "WebFetch(domain:www.infoq.com)",
       "WebFetch(domain:www.speakeasy.com)",
       "WebFetch(domain:aiblewmymind.substack.com)",
-      "WebFetch(domain:gofastmcp.com)"
+      "WebFetch(domain:gofastmcp.com)",
+      "Bash(python:*)"
     ]
   },
   "enabledMcpjsonServers": [

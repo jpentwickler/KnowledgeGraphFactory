@@ -8,16 +8,22 @@ Tests:
 """
 
 import pytest
+from unittest.mock import MagicMock
 from tools.query_tools import (
     _get_domain_labels,
     _get_domain_node_properties,
     _get_domain_relationships,
     _get_text_entities,
+    _get_text_entity_properties,
     _get_text_relationships,
+    _get_layer_classification,
+    _detect_cross_layer_violation,
+    _introspect_text_schema,
     format_cypher_results,
     format_retriever_results,
     calculate_confidence,
     _validate_read_only_cypher,
+    _escape_lucene,
 )
 
 
@@ -403,8 +409,8 @@ def test_get_text_relationships_with_valid_types():
     rels = _get_text_relationships(state)
     assert len(rels) == 2
     types = [r["type"] for r in rels]
-    assert "has_issue" in types
-    assert "reviewed" in types
+    assert "HAS_ISSUE" in types
+    assert "REVIEWED" in types
 
 
 def test_get_text_relationships_empty():
@@ -435,7 +441,7 @@ def test_get_text_relationships_structure():
 
     rels = _get_text_relationships(state)
     assert len(rels) == 1
-    assert rels[0]["type"] == "reported"
+    assert rels[0]["type"] == "REPORTED"
     assert rels[0]["from"] == "Customer"
     assert rels[0]["to"] == "QualityIssue"
 
@@ -746,3 +752,528 @@ def test_cross_layer_formatter_handles_no_domain_entity():
     assert result.metadata["entity"]["properties"]["name"] == "@home_chef"
     assert result.metadata["domain_entity"] is None
     assert result.metadata["domain_label"] is None
+
+
+# =============================================================================
+# Lucene Escaping Tests (4 tests)
+# =============================================================================
+
+def test_escape_lucene_plain_text():
+    """Plain text passes through unchanged."""
+    assert _escape_lucene("which suppliers have complaints") == "which suppliers have complaints"
+
+
+def test_escape_lucene_special_chars():
+    """All Lucene special characters are escaped."""
+    assert _escape_lucene('a + b') == r'a \+ b'
+    assert _escape_lucene('a/b') == r'a\/b'
+    assert _escape_lucene('say "hello"') == r'say \"hello\"'
+    assert _escape_lucene('price: 100') == r'price\: 100'
+
+
+def test_escape_lucene_question_marks_and_wildcards():
+    """Question marks and wildcards are escaped."""
+    assert _escape_lucene("what is this?") == r"what is this\?"
+    assert _escape_lucene("test*") == r"test\*"
+    assert _escape_lucene("a~b") == r"a\~b"
+
+
+def test_escape_lucene_empty_string():
+    """Empty string returns empty."""
+    assert _escape_lucene("") == ""
+
+
+# =============================================================================
+# Strategy Selector Architecture Block Tests (3 tests)
+# =============================================================================
+
+def _build_architecture_block(domain_labels, text_entities, has_domain, has_text):
+    """Replicate the architecture block logic from _select_retrieval_strategy."""
+    if not (has_domain and has_text):
+        return ""
+    arch_lines = [
+        "",
+        "DUAL-LAYER ARCHITECTURE:",
+        "This graph has two separate node populations that share some labels.",
+        "Text-extracted nodes (from unstructured data) carry the `__Entity__` label.",
+        "Domain nodes (from structured data) do NOT have the `__Entity__` label.",
+        "The `CORRESPONDS_TO` relationship bridges text entities to domain entities.",
+    ]
+    overlap = set(domain_labels) & set(text_entities)
+    if overlap:
+        arch_lines.append(f"Overlapping labels (exist in BOTH layers as separate nodes): {', '.join(sorted(overlap))}")
+    arch_lines.append("Cross-layer Cypher pattern: MATCH (t:__Entity__:Label)-[:CORRESPONDS_TO]->(d:Label)")
+    return "\n".join(arch_lines)
+
+
+def test_architecture_block_both_layers_with_overlap():
+    """Architecture block shows overlapping labels when both layers exist."""
+    block = _build_architecture_block(
+        domain_labels=["Product", "Supplier", "Part"],
+        text_entities=["Part", "Review", "Defect"],
+        has_domain=True,
+        has_text=True,
+    )
+    assert "DUAL-LAYER ARCHITECTURE" in block
+    assert "__Entity__" in block
+    assert "CORRESPONDS_TO" in block
+    assert "Part" in block  # Overlapping label
+    assert "Supplier" not in block  # Domain-only, not in overlap line
+
+
+def test_architecture_block_both_layers_no_overlap():
+    """Architecture block still appears without overlapping labels."""
+    block = _build_architecture_block(
+        domain_labels=["Product", "Supplier"],
+        text_entities=["Review", "Defect"],
+        has_domain=True,
+        has_text=True,
+    )
+    assert "DUAL-LAYER ARCHITECTURE" in block
+    assert "CORRESPONDS_TO" in block
+    assert "Overlapping" not in block
+
+
+def test_architecture_block_single_layer():
+    """No architecture block when only one layer exists."""
+    assert _build_architecture_block(["Product"], [], True, False) == ""
+    assert _build_architecture_block([], ["Review"], False, True) == ""
+
+
+# =============================================================================
+# Shared fixture for cross-layer tests
+# =============================================================================
+
+def _state_with_both_layers():
+    """State with both domain and text layers, including overlapping labels."""
+    return {
+        "approved_construction_plan": {
+            "Product": {
+                "construction_type": "node",
+                "label": "Product",
+                "properties": ["product_name", "price"],
+            },
+            "Part": {
+                "construction_type": "node",
+                "label": "Part",
+                "properties": ["part_name"],
+            },
+            "Supplier": {
+                "construction_type": "node",
+                "label": "Supplier",
+                "properties": ["name"],
+            },
+            "Assembly": {
+                "construction_type": "node",
+                "label": "Assembly",
+                "properties": ["assembly_name"],
+            },
+            "SUPPLIES": {
+                "construction_type": "relationship",
+                "relationship_type": "SUPPLIES",
+                "from_node_label": "Supplier",
+                "to_node_label": "Part",
+                "properties": [],
+            },
+            "HAS_ASSEMBLY": {
+                "construction_type": "relationship",
+                "relationship_type": "HAS_ASSEMBLY",
+                "from_node_label": "Product",
+                "to_node_label": "Assembly",
+                "properties": [],
+            },
+            "CONTAINS_PART": {
+                "construction_type": "relationship",
+                "relationship_type": "CONTAINS_PART",
+                "from_node_label": "Assembly",
+                "to_node_label": "Part",
+                "properties": [],
+            },
+        },
+        "approved_entity_types": {
+            "Review": {"description": "Product review"},
+            "Reviewer": {"description": "Person who wrote review"},
+            "Defect": {"description": "Quality defect"},
+            "Product": {"description": "Product mentioned in review"},
+            "Part": {"description": "Part mentioned in review"},
+        },
+        "approved_fact_types": {
+            "evaluates": {
+                "subject_label": "Review",
+                "predicate_label": "evaluates",
+                "object_label": "Product",
+            },
+            "authored": {
+                "subject_label": "Reviewer",
+                "predicate_label": "authored",
+                "object_label": "Review",
+            },
+            "mentions_defect_in": {
+                "subject_label": "Review",
+                "predicate_label": "mentions_defect_in",
+                "object_label": "Part",
+            },
+            "reports": {
+                "subject_label": "Reviewer",
+                "predicate_label": "reports",
+                "object_label": "Defect",
+            },
+            "observed_in": {
+                "subject_label": "Defect",
+                "predicate_label": "observed_in",
+                "object_label": "Part",
+            },
+        },
+    }
+
+
+# =============================================================================
+# TestGetLayerClassification (5 tests)
+# =============================================================================
+
+class TestGetLayerClassification:
+    """Tests for _get_layer_classification."""
+
+    def test_both_layers_present(self):
+        """Both layers produce correct sets."""
+        state = _state_with_both_layers()
+        c = _get_layer_classification(state)
+        assert c["domain_labels"] == {"Product", "Part", "Supplier", "Assembly"}
+        assert c["domain_rel_types"] == {"SUPPLIES", "HAS_ASSEMBLY", "CONTAINS_PART"}
+        assert c["text_labels"] == {"Review", "Reviewer", "Defect", "Product", "Part"}
+        assert c["text_rel_types"] == {"EVALUATES", "AUTHORED", "MENTIONS_DEFECT_IN", "REPORTS", "OBSERVED_IN"}
+
+    def test_domain_only(self):
+        """Text sets are empty when no text layer."""
+        state = _state_with_both_layers()
+        del state["approved_entity_types"]
+        del state["approved_fact_types"]
+        c = _get_layer_classification(state)
+        assert len(c["domain_labels"]) == 4
+        assert c["text_labels"] == set()
+        assert c["text_rel_types"] == set()
+
+    def test_text_only(self):
+        """Domain sets are empty when no domain layer."""
+        state = _state_with_both_layers()
+        del state["approved_construction_plan"]
+        c = _get_layer_classification(state)
+        assert c["domain_labels"] == set()
+        assert c["domain_rel_types"] == set()
+        assert len(c["text_labels"]) == 5
+
+    def test_empty_state(self):
+        """All sets empty for empty state."""
+        c = _get_layer_classification({})
+        assert c["domain_labels"] == set()
+        assert c["domain_rel_types"] == set()
+        assert c["text_labels"] == set()
+        assert c["text_rel_types"] == set()
+        assert c["overlapping_labels"] == set()
+
+    def test_overlapping_labels(self):
+        """Overlapping labels computed correctly."""
+        state = _state_with_both_layers()
+        c = _get_layer_classification(state)
+        assert c["overlapping_labels"] == {"Product", "Part"}
+
+
+# =============================================================================
+# TestDetectCrossLayerViolation (9 tests)
+# =============================================================================
+
+class TestDetectCrossLayerViolation:
+    """Tests for _detect_cross_layer_violation."""
+
+    def test_pure_domain_query(self):
+        """Pure domain query returns None."""
+        state = _state_with_both_layers()
+        cypher = "MATCH (s:Supplier)-[:SUPPLIES]->(p:Part) RETURN s.name, p.part_name"
+        assert _detect_cross_layer_violation(cypher, state) is None
+
+    def test_pure_text_query(self):
+        """Pure text query returns None."""
+        state = _state_with_both_layers()
+        cypher = "MATCH (r:Review)-[:EVALUATES]->(p:Product) RETURN r, p"
+        assert _detect_cross_layer_violation(cypher, state) is None
+
+    def test_cross_layer_with_bridge(self):
+        """Cross-layer query WITH CORRESPONDS_TO returns None."""
+        state = _state_with_both_layers()
+        cypher = (
+            "MATCH (r:Review)-[:EVALUATES]->(tp:__Entity__:Product)"
+            "-[:CORRESPONDS_TO]->(dp:Product)"
+            "-[:HAS_ASSEMBLY]->(a:Assembly) RETURN r, a"
+        )
+        assert _detect_cross_layer_violation(cypher, state) is None
+
+    def test_cross_layer_without_bridge(self):
+        """Cross-layer query WITHOUT CORRESPONDS_TO returns violation."""
+        state = _state_with_both_layers()
+        cypher = (
+            "MATCH (r:Review)-[:EVALUATES]->(p:Product)"
+            "-[:HAS_ASSEMBLY]->(a:Assembly) RETURN r, a"
+        )
+        result = _detect_cross_layer_violation(cypher, state)
+        assert result is not None
+        assert "EVALUATES" in result["text_rels_used"]
+        assert "HAS_ASSEMBLY" in result["domain_rels_used"]
+        assert "message" in result
+
+    def test_no_relationships_in_cypher(self):
+        """Cypher without relationship patterns returns None."""
+        state = _state_with_both_layers()
+        cypher = "MATCH (n:Product) RETURN n.name LIMIT 10"
+        assert _detect_cross_layer_violation(cypher, state) is None
+
+    def test_empty_state(self):
+        """Empty state returns None (no layers to cross)."""
+        assert _detect_cross_layer_violation("MATCH (n)-[:REL]->(m) RETURN n", {}) is None
+
+    def test_single_layer_state(self):
+        """Single-layer state returns None."""
+        state = _state_with_both_layers()
+        del state["approved_entity_types"]
+        del state["approved_fact_types"]
+        cypher = "MATCH (s:Supplier)-[:SUPPLIES]->(p:Part) RETURN s, p"
+        assert _detect_cross_layer_violation(cypher, state) is None
+
+    def test_variable_syntax(self):
+        """[r:TYPE] variable syntax is detected."""
+        state = _state_with_both_layers()
+        cypher = (
+            "MATCH (r:Review)-[rel:EVALUATES]->(p:Product)"
+            "<-[r2:HAS_ASSEMBLY]-(a:Assembly) RETURN r, a"
+        )
+        result = _detect_cross_layer_violation(cypher, state)
+        assert result is not None
+        assert "EVALUATES" in result["text_rels_used"]
+        assert "HAS_ASSEMBLY" in result["domain_rels_used"]
+
+    def test_pipe_syntax(self):
+        """[:TYPE1|TYPE2] pipe syntax is detected."""
+        state = _state_with_both_layers()
+        cypher = (
+            "MATCH (n)-[:EVALUATES|HAS_ASSEMBLY]->(m) RETURN n, m"
+        )
+        result = _detect_cross_layer_violation(cypher, state)
+        assert result is not None
+        assert "EVALUATES" in result["text_rels_used"]
+        assert "HAS_ASSEMBLY" in result["domain_rels_used"]
+
+
+# =============================================================================
+# Mock helpers for Neo4j nodes
+# =============================================================================
+
+class MockNode:
+    """Mock Neo4j Node with keys() and __getitem__."""
+    def __init__(self, props):
+        self._props = props
+    def keys(self):
+        return list(self._props.keys())
+    def __getitem__(self, key):
+        return self._props[key]
+
+
+def _mock_driver_for_introspect(label_results):
+    """Build a mock driver that returns specified results per label.
+
+    Args:
+        label_results: dict mapping label -> (props_list, node_props_dict) or None
+    """
+    driver = MagicMock()
+    session = MagicMock()
+    driver.session.return_value.__enter__ = MagicMock(return_value=session)
+    driver.session.return_value.__exit__ = MagicMock(return_value=False)
+
+    def run_side_effect(query):
+        result = MagicMock()
+        # Extract label from query
+        for label, data in label_results.items():
+            if f":`{label}`" in query:
+                if data is None:
+                    result.single.return_value = None
+                else:
+                    props_list, node_props = data
+                    node = MockNode(node_props)
+                    record = {"props": props_list, "n": node}
+                    mock_record = MagicMock()
+                    mock_record.__getitem__ = lambda self, key, r=record: r[key]
+                    result.single.return_value = mock_record
+                return result
+        result.single.return_value = None
+        return result
+
+    session.run.side_effect = run_side_effect
+    return driver
+
+
+# =============================================================================
+# TestIntrospectTextSchema (8 tests)
+# =============================================================================
+
+class TestIntrospectTextSchema:
+    """Tests for _introspect_text_schema."""
+
+    def test_introspect_basic(self):
+        """Two entity labels produce correct state structure."""
+        state = {
+            "approved_entity_types": {
+                "Product": {"description": "A product"},
+                "Review": {"description": "A review"},
+            }
+        }
+        driver = _mock_driver_for_introspect({
+            "Product": (["name", "url"], {"name": "Stockholm Chair", "url": "http://example.com"}),
+            "Review": (["content", "rating"], {"content": "Great chair!", "rating": "4/5"}),
+        })
+
+        result = _introspect_text_schema(driver, state)
+
+        assert "Product" in result
+        assert "Review" in result
+        assert result["Product"]["properties"]["name"]["sample"] == "Stockholm Chair"
+        assert result["Review"]["properties"]["rating"]["sample"] == "4/5"
+        assert state["text_entity_schema"] == result
+
+    def test_introspect_filters_embedding(self):
+        """Embedding property is excluded."""
+        state = {
+            "approved_entity_types": {
+                "Product": {"description": "A product"},
+            }
+        }
+        driver = _mock_driver_for_introspect({
+            "Product": (["name", "embedding"], {"name": "Chair", "embedding": [0.1, 0.2]}),
+        })
+
+        result = _introspect_text_schema(driver, state)
+
+        assert "name" in result["Product"]["properties"]
+        assert "embedding" not in result["Product"]["properties"]
+
+    def test_introspect_filters_dunder_props(self):
+        """__internal__ prefixed properties are excluded."""
+        state = {
+            "approved_entity_types": {
+                "Product": {"description": "A product"},
+            }
+        }
+        driver = _mock_driver_for_introspect({
+            "Product": (["name", "__internal_id__"], {"name": "Chair", "__internal_id__": "abc"}),
+        })
+
+        result = _introspect_text_schema(driver, state)
+
+        assert "name" in result["Product"]["properties"]
+        assert "__internal_id__" not in result["Product"]["properties"]
+
+    def test_introspect_skips_infrastructure_labels(self):
+        """Chunk, Document, __KGBuilder__, __Entity__ are skipped."""
+        state = {
+            "approved_entity_types": {
+                "Product": {"description": "A product"},
+                "Chunk": {"description": "Shouldn't be here"},
+                "Document": {"description": "Shouldn't be here"},
+                "__Entity__": {"description": "Infrastructure"},
+                "__KGBuilder__": {"description": "Infrastructure"},
+            }
+        }
+        driver = _mock_driver_for_introspect({
+            "Product": (["name"], {"name": "Chair"}),
+        })
+
+        result = _introspect_text_schema(driver, state)
+
+        assert "Product" in result
+        assert "Chunk" not in result
+        assert "Document" not in result
+        assert "__Entity__" not in result
+        assert "__KGBuilder__" not in result
+
+    def test_introspect_empty_graph(self):
+        """Labels in state but no nodes in graph produces empty schema."""
+        state = {
+            "approved_entity_types": {
+                "Product": {"description": "A product"},
+            }
+        }
+        driver = _mock_driver_for_introspect({
+            "Product": None,  # No nodes found
+        })
+
+        result = _introspect_text_schema(driver, state)
+
+        assert result == {}
+        assert state["text_entity_schema"] == {}
+
+    def test_introspect_error_handling(self):
+        """Driver exception returns empty dict without raising."""
+        state = {
+            "approved_entity_types": {
+                "Product": {"description": "A product"},
+            }
+        }
+        driver = MagicMock()
+        driver.session.side_effect = Exception("Connection refused")
+
+        result = _introspect_text_schema(driver, state)
+
+        assert result == {}
+        assert state["text_entity_schema"] == {}
+
+    def test_introspect_truncates_long_values(self):
+        """Sample values longer than 100 chars are truncated."""
+        long_value = "x" * 500
+        state = {
+            "approved_entity_types": {
+                "Review": {"description": "A review"},
+            }
+        }
+        driver = _mock_driver_for_introspect({
+            "Review": (["content"], {"content": long_value}),
+        })
+
+        result = _introspect_text_schema(driver, state)
+
+        sample = result["Review"]["properties"]["content"]["sample"]
+        assert len(sample) == 100
+        assert sample == "x" * 100
+
+    def test_introspect_no_entity_types(self):
+        """No approved_entity_types produces empty schema."""
+        state = {}
+        driver = MagicMock()
+
+        result = _introspect_text_schema(driver, state)
+
+        assert result == {}
+        assert state["text_entity_schema"] == {}
+
+
+# =============================================================================
+# TestGetTextEntityProperties (2 tests)
+# =============================================================================
+
+class TestGetTextEntityProperties:
+    """Tests for _get_text_entity_properties."""
+
+    def test_with_schema(self):
+        """Returns stored schema when present."""
+        schema = {
+            "Product": {
+                "properties": {
+                    "name": {"sample": "Stockholm Chair"},
+                }
+            }
+        }
+        state = {"text_entity_schema": schema}
+
+        result = _get_text_entity_properties(state)
+        assert result == schema
+
+    def test_missing_schema(self):
+        """Returns empty dict when no schema in state."""
+        result = _get_text_entity_properties({})
+        assert result == {}

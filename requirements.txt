@@ -3,7 +3,8 @@ anthropic>=0.40.0
 python-dotenv>=1.0.0
 
 # MCP server
-fastmcp<3
+fastmcp>=2.3,<3
+uvicorn>=0.30.0
 
 # Neo4j (for Stage 6)
 neo4j>=5.0.0
