@@ -20,19 +20,13 @@ from core.config import CLAUDE_MODEL
 
 from tools.query_tools import (
     _get_domain_labels,
-    _get_domain_node_properties,
-    _get_domain_relationships,
     _get_text_entities,
-    _get_text_entity_properties,
-    _get_text_relationships,
-    _detect_cross_layer_violation,
     format_cypher_results,
     format_retriever_results,
     calculate_confidence,
     _validate_read_only_cypher,
     _escape_lucene,
 )
-from core.state import has_approved
 from core.tracing import traceable, wrap_anthropic
 
 
@@ -83,30 +77,6 @@ def _cross_layer_formatter(record: neo4j.Record):
     )
 
 
-def _format_text_entity_props_block(state: dict) -> str:
-    """Format text entity properties for inclusion in prompts.
-
-    Returns a multi-line string showing entity labels with their properties
-    and sample values, or empty string if no text_entity_schema in state.
-    """
-    text_props = _get_text_entity_properties(state)
-    if not text_props:
-        return ""
-    lines = ["  Entity properties:"]
-    for label, info in text_props.items():
-        props = info.get("properties", {})
-        if props:
-            parts = []
-            for pname, pinfo in props.items():
-                sample = pinfo.get("sample", "")
-                if sample:
-                    parts.append(f'{pname} (e.g. "{sample}")')
-                else:
-                    parts.append(pname)
-            lines.append(f"    {label} [{', '.join(parts)}]")
-    return "\n".join(lines) + "\n"
-
-
 # =============================================================================
 # Strategy 1: Claude-Powered Strategy Selection
 # =============================================================================
@@ -115,115 +85,37 @@ def _format_text_entity_props_block(state: dict) -> str:
 async def _select_retrieval_strategy(
     question: str,
     context: str,
-    state: dict
+    state: dict,
+    schema=None,
 ) -> dict:
     """Use Claude API to select optimal retrieval strategy.
 
-    Analyzes the question and available graph layers to choose the best
-    retrieval approach. Returns structured decision with reasoning.
+    Uses schema.compact_summary() for graph context when schema is provided.
 
     Args:
         question: Natural language question or Cypher query
         context: Optional context to guide selection
-        state: Pipeline state (to determine available graph layers)
+        state: Pipeline state (unused when schema provided)
+        schema: GraphSchema for compact context
 
     Returns:
         {
             "strategy": str,        # One of: schema, cypher, vector, hybrid, cross_layer
             "reasoning": str,       # Explanation of why this strategy was chosen
-            "parameters": dict      # Strategy-specific parameters (cypher_query, top_k, etc.)
+            "parameters": dict      # Strategy-specific parameters (top_k, etc.)
         }
 
     Fallback: Returns {"strategy": "schema", ...} on any error
     """
-    # Extract graph context from state
-    domain_labels = _get_domain_labels(state)
-    domain_node_props = _get_domain_node_properties(state)
-    text_entities = _get_text_entities(state)
-    has_text_graph = "text_graph_progress" in state
-    has_domain_graph = has_approved(state, "construction_plan")
-
-    # Extract relationship info from state
-    domain_rels = _get_domain_relationships(state)
-    text_rels = _get_text_relationships(state)
-
-    # Build graph context summary
-    graph_context = []
-    if has_domain_graph:
-        if domain_node_props:
-            lines = [f"Domain layer with {len(domain_node_props)} node types:"]
-            for label, props in domain_node_props.items():
-                if props:
-                    lines.append(f"  {label} [{', '.join(props)}]")
-                else:
-                    lines.append(f"  {label}")
-            graph_context.append("\n".join(lines))
-        else:
-            graph_context.append(f"Domain layer with {len(domain_labels)} node types: {', '.join(domain_labels[:5])}")
-        if domain_rels:
-            rel_strs = []
-            for r in domain_rels:
-                s = f"{r['type']} ({r['from']} -> {r['to']}"
-                if r.get("properties"):
-                    s += f" [{', '.join(r['properties'])}]"
-                s += ")"
-                rel_strs.append(s)
-            graph_context.append(f"Domain relationships: {', '.join(rel_strs)}")
-    if has_text_graph:
-        text_props = _get_text_entity_properties(state)
-        if text_props:
-            lines = [f"Text layer with {len(text_entities)} entity types (all carry __Entity__ label):"]
-            for entity in text_entities:
-                info = text_props.get(entity)
-                if info and info.get("properties"):
-                    prop_parts = []
-                    for pname, pinfo in info["properties"].items():
-                        sample = pinfo.get("sample", "")
-                        if sample:
-                            prop_parts.append(f'{pname} (e.g. "{sample}")')
-                        else:
-                            prop_parts.append(pname)
-                    lines.append(f"  {entity} [{', '.join(prop_parts)}]")
-                else:
-                    lines.append(f"  {entity}")
-            graph_context.append("\n".join(lines))
-        else:
-            graph_context.append(f"Text layer with {len(text_entities)} entity types: {', '.join(text_entities[:5])}")
-        if text_rels:
-            rel_strs = [f"{r['type']} ({r['from']} -> {r['to']})" for r in text_rels]
-            graph_context.append(f"Text relationships: {', '.join(rel_strs)}")
-
-    if not graph_context:
-        # No graph built yet, return schema strategy
+    graph_summary = schema.compact_summary() if schema is not None else ""
+    if not graph_summary:
         return {
             "strategy": "schema",
             "reasoning": "No graph built yet. Showing available schema.",
             "parameters": {}
         }
 
-    graph_summary = "\n".join(graph_context)
-
-    # Build dual-layer architecture context (only when both layers exist)
-    architecture_block = ""
-    if has_domain_graph and has_text_graph:
-        arch_lines = [
-            "",
-            "DUAL-LAYER ARCHITECTURE:",
-            "This graph has two separate node populations that share some labels.",
-            "Text-extracted nodes (from unstructured data) carry the `__Entity__` label.",
-            "Domain nodes (from structured data) do NOT have the `__Entity__` label.",
-            "The `CORRESPONDS_TO` relationship bridges text entities to domain entities.",
-        ]
-        # Show which labels overlap between layers
-        overlap = set(domain_labels) & set(text_entities)
-        if overlap:
-            arch_lines.append(f"Overlapping labels (exist in BOTH layers as separate nodes): {', '.join(sorted(overlap))}")
-        arch_lines.append("Cross-layer Cypher pattern: MATCH (t:__Entity__:Label)-[:CORRESPONDS_TO]->(d:Label)")
-        architecture_block = "\n".join(arch_lines)
-
-    graph_summary = graph_summary + architecture_block
-
-    # Build system prompt for Claude
+    # Build system prompt for Claude — classification only, no Cypher generation
     system_prompt = f"""You are a knowledge graph query strategy selector.
 
 Available graph layers:
@@ -238,12 +130,6 @@ Available strategies:
 2. **cypher**: Execute structured Cypher queries
    - Use when: Question is a Cypher query OR requires precise graph traversal,
      counting, ranking, or aggregation — including across layers
-   - CRITICAL: Only suggest Cypher if you can generate a SAFE, READ-ONLY query
-   - Blocked keywords: CREATE, DELETE, SET, REMOVE, MERGE
-   - Required keywords: MATCH or RETURN
-   - For cross-layer aggregation (counting, ranking, comparing data across domain and text
-     layers), generate Cypher that bridges via `CORRESPONDS_TO` and uses `__Entity__` to
-     distinguish text-extracted nodes from domain nodes
 
 3. **vector**: Semantic similarity search on text chunks
    - Use when: Question is about content/meaning in unstructured text
@@ -255,21 +141,18 @@ Available strategies:
 
 5. **cross_layer**: Hybrid search (vector + fulltext) + entity traversal across layers
    - Use when: Question asks for text content linked to domain entities — retrieval,
-     not aggregation (e.g. "what do reviews say about product X?")
+     not aggregation
    - ALSO use when: Question contains specific names, @mentions, or keywords that need
-     exact matching AND you need entity/domain context (e.g. "reviews by @home_chef")
+     exact matching AND you need entity/domain context
    - Requires: Both domain AND text layers available
    - Traverses: FROM_CHUNK (text entities to chunks) + CORRESPONDS_TO (text to domain entities)
    - Do NOT use for counting, ranking, or aggregation — use cypher instead
-
-IMPORTANT: Cypher has no GROUP BY — aggregation is implicit in WITH/RETURN.
 
 Respond with JSON only (no markdown):
 {{
   "strategy": "schema|cypher|vector|hybrid|cross_layer",
   "reasoning": "Brief explanation of why this strategy is best",
   "parameters": {{
-    "cypher_query": "...",  // Only for strategy=cypher
     "top_k": 5              // Only for vector-based strategies (optional, default=5)
   }}
 }}"""
@@ -301,16 +184,6 @@ Respond with JSON only (no markdown):
             response_text = response_text.split("```")[1].split("```")[0].strip()
 
         result = json.loads(response_text)
-
-        # Validate Cypher if strategy is cypher
-        if result.get("strategy") == "cypher":
-            cypher_query = result.get("parameters", {}).get("cypher_query", "")
-            if not cypher_query:
-                raise ValueError("Cypher strategy selected but no query provided")
-
-            # Validate safety
-            _validate_read_only_cypher(cypher_query)
-
         return result
 
     except Exception as e:
@@ -327,15 +200,16 @@ Respond with JSON only (no markdown):
 # =============================================================================
 
 @traceable(name="query.execute_schema")
-def _execute_schema_query(driver: Driver, state: dict) -> dict:
+def _execute_schema_query(driver: Driver, state: dict, schema=None) -> dict:
     """Return graph schema with dynamic layer classification.
 
-    Queries the graph for labels, relationships, and node counts.
-    Classifies labels into domain layer (from state) and text layer (Chunk/Document).
+    When schema is provided, queries node counts then uses schema.markdown()
+    for the answer. Otherwise falls back to inline assembly.
 
     Args:
         driver: Neo4j driver instance
         state: Pipeline state (for domain label classification)
+        schema: Optional GraphSchema for markdown rendering
 
     Returns:
         {
@@ -345,8 +219,10 @@ def _execute_schema_query(driver: Driver, state: dict) -> dict:
             "details": dict         # Metadata
         }
     """
-    domain_labels = _get_domain_labels(state)
-    text_labels = ["Chunk", "Document", "__Entity__"]  # Known text layer labels
+    # Derive label sets from schema (fallback to state for backward compat)
+    domain_label_set = set(schema.domain_labels) if schema else set(_get_domain_labels(state))
+    infra_labels = {"Chunk", "Document", "__Entity__"}
+    text_label_set = (set(schema.text_labels) if schema else set()) | infra_labels
 
     with driver.session() as session:
         # Get all labels
@@ -363,64 +239,46 @@ def _execute_schema_query(driver: Driver, state: dict) -> dict:
             count_result = session.run(f"MATCH (n:`{label}`) RETURN count(n) AS count")
             counts[label] = count_result.single()["count"]
 
-        # Get property keys per label (sample one node)
+        # Get property keys per label (sample one node, layer-aware)
+        # For labels that exist in both domain and text layers, sample
+        # each layer separately to avoid returning wrong properties.
         properties = {}
+        overlapping = domain_label_set & text_label_set
         for label in all_labels:
-            prop_result = session.run(
-                f"MATCH (n:`{label}`) RETURN keys(n) AS props LIMIT 1"
-            )
-            record = prop_result.single()
-            properties[label] = sorted(record["props"]) if record else []
-
-    # Build relationship endpoint lookup from state
-    domain_rels = _get_domain_relationships(state)
-    text_rels = _get_text_relationships(state)
-    rel_endpoint_map = {}
-    for r in domain_rels + text_rels:
-        rel_endpoint_map[r["type"]] = r
-
-    # Classify labels
-    domain_found = [l for l in all_labels if l in domain_labels]
-    text_found = [l for l in all_labels if l in text_labels]
-    other = [l for l in all_labels if l not in domain_labels and l not in text_labels]
-
-    # Build answer
-    lines = ["# Knowledge Graph Schema\n"]
-
-    if domain_found:
-        lines.append("## Domain Layer (from structured data)")
-        for label in domain_found:
-            props = properties.get(label, [])
-            lines.append(f"  - {label}: {counts[label]:,} nodes {props}")
-        lines.append("")
-
-    if text_found:
-        lines.append("## Text Layer (from unstructured data)")
-        for label in text_found:
-            props = properties.get(label, [])
-            lines.append(f"  - {label}: {counts[label]:,} nodes {props}")
-        lines.append("")
-
-    if other:
-        lines.append("## Other Labels")
-        for label in other:
-            props = properties.get(label, [])
-            lines.append(f"  - {label}: {counts[label]:,} nodes {props}")
-        lines.append("")
-
-    if all_rels:
-        lines.append("## Relationships")
-        for rel in all_rels:
-            info = rel_endpoint_map.get(rel)
-            if info:
-                s = f"  - {rel}: {info['from']} -> {info['to']}"
-                if info.get("properties"):
-                    s += f" [{', '.join(info['properties'])}]"
-                lines.append(s)
+            if label in overlapping:
+                # Domain copy: exclude __Entity__ nodes
+                domain_result = session.run(
+                    f"MATCH (n:`{label}`) WHERE NOT n:`__Entity__` "
+                    f"RETURN keys(n) AS props LIMIT 1"
+                )
+                domain_record = domain_result.single()
+                properties[label] = sorted(domain_record["props"]) if domain_record else []
+                # Text copy: stored under "label:__Entity__" key
+                text_result = session.run(
+                    f"MATCH (n:`{label}`) WHERE n:`__Entity__` "
+                    f"RETURN keys(n) AS props LIMIT 1"
+                )
+                text_record = text_result.single()
+                if text_record:
+                    text_props = sorted(
+                        p for p in text_record["props"]
+                        if p != "embedding" and not p.startswith("__")
+                    )
+                    properties[f"{label}:__Entity__"] = text_props
             else:
-                lines.append(f"  - {rel}")
+                prop_result = session.run(
+                    f"MATCH (n:`{label}`) RETURN keys(n) AS props LIMIT 1"
+                )
+                record = prop_result.single()
+                properties[label] = sorted(record["props"]) if record else []
 
-    answer = "\n".join(lines)
+    answer = schema.markdown(node_counts=counts) if schema is not None else ""
+
+    # Relationship endpoints from schema (no _get_* calls needed)
+    rel_endpoint_map = schema.rel_endpoint_map if schema else {}
+
+    domain_found = [l for l in all_labels if l in domain_label_set]
+    text_found = [l for l in all_labels if l in text_label_set]
 
     # Build evidence
     evidence = [
@@ -496,23 +354,88 @@ def _execute_cypher(driver: Driver, query: str) -> dict:
 # Cross-Layer Cypher Validation + Guided Regeneration
 # =============================================================================
 
+@traceable(name="query.generate_cypher")
+async def _generate_cypher_query(question: str, schema, context: str = "") -> str:
+    """Generate a Cypher query from a natural language question using full schema.
+
+    Uses schema.cypher_notation() for precise property placement.
+
+    Args:
+        question: Natural language question
+        schema: GraphSchema with cypher_notation() renderer
+        context: Optional context to guide generation
+
+    Returns:
+        Generated Cypher query string
+
+    Raises:
+        ValueError: If generated query fails read-only validation
+    """
+    schema_notation = schema.cypher_notation()
+
+    system_prompt = f"""You are a Cypher query generator for a knowledge graph.
+
+GRAPH SCHEMA (properties belong to the node or relationship they are listed under):
+{schema_notation}
+
+RULES:
+- Generate a SAFE, READ-ONLY Cypher query
+- Blocked keywords: CREATE, DELETE, SET, REMOVE, MERGE
+- Must contain: MATCH or RETURN
+- Use ONLY the labels, relationship types, and property names shown in the schema
+- Properties are on the object they appear under — do NOT move properties between objects
+- CRITICAL: When querying across layers (domain + text), bridge via CORRESPONDS_TO:
+    MATCH (t:__Entity__:Label)-[:CORRESPONDS_TO]->(d:Label)
+- Cypher has no GROUP BY — aggregation is implicit in WITH/RETURN
+- For currency values: strip '$' and commas, cast with toFloat()
+- For fraction values like "5/5": split on '/' for numeric comparison
+- Return ONLY the Cypher query, no explanation"""
+
+    user_message = f"Question: {question}"
+    if context:
+        user_message += f"\n\nContext: {context}"
+
+    import anthropic
+    client = wrap_anthropic(anthropic.Anthropic())
+
+    response = client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=1024,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_message}]
+    )
+
+    cypher = response.content[0].text.strip()
+
+    # Strip markdown code blocks if present
+    if "```cypher" in cypher:
+        cypher = cypher.split("```cypher")[1].split("```")[0].strip()
+    elif "```" in cypher:
+        cypher = cypher.split("```")[1].split("```")[0].strip()
+
+    _validate_read_only_cypher(cypher)
+    return cypher
+
+
 @traceable(name="query.regenerate_cross_layer_cypher")
 async def _regenerate_cross_layer_cypher(
     question: str,
     failed_cypher: str,
     violation: dict,
-    state: dict
+    state: dict,
+    schema=None,
 ) -> str:
     """Regenerate a cross-layer Cypher query with CORRESPONDS_TO bridge.
 
-    Called when _detect_cross_layer_violation finds a query that spans both
-    domain and text layers without the bridge relationship.
+    When schema is provided, uses schema.for_repair() for context.
+    Otherwise falls back to inline assembly from state.
 
     Args:
         question: Original natural language question
         failed_cypher: The Cypher that violated cross-layer rules
-        violation: Dict from _detect_cross_layer_violation with details
+        violation: Dict with cross-layer violation details
         state: Pipeline state for schema context
+        schema: Optional GraphSchema for repair context
 
     Returns:
         Corrected Cypher query string
@@ -520,19 +443,7 @@ async def _regenerate_cross_layer_cypher(
     Raises:
         ValueError: If corrected query fails read-only validation
     """
-    domain_rels = _get_domain_relationships(state)
-    text_rels = _get_text_relationships(state)
-    domain_labels = _get_domain_labels(state)
-    text_entities = _get_text_entities(state)
-
-    domain_schema = "\n".join(
-        f"  ({r['from']})-[:{r['type']}]->({r['to']})" for r in domain_rels
-    )
-    text_schema = "\n".join(
-        f"  ({r['from']})-[:{r['type']}]->({r['to']})" for r in text_rels
-    )
-
-    overlapping = sorted(violation.get("overlapping_labels", set()))
+    schema_context = schema.for_repair(violation) if schema is not None else ""
 
     system_prompt = f"""You are a Cypher query repair assistant for a dual-layer knowledge graph.
 
@@ -542,24 +453,10 @@ FAILED QUERY:
 WHY IT FAILS:
 {violation['message']}
 Domain and text layers have SEPARATE node populations. Nodes with the same label
-(e.g. Product) in different layers are NOT the same nodes. You must bridge them
-with the CORRESPONDS_TO relationship.
+in different layers are NOT the same nodes. You must bridge them with the
+CORRESPONDS_TO relationship.
 
-DOMAIN LAYER (from structured CSV data):
-  Node labels: {', '.join(domain_labels)}
-  Relationships:
-{domain_schema}
-
-TEXT LAYER (from unstructured text, all entities carry __Entity__ label):
-  Entity labels: {', '.join(text_entities)}
-  Relationships:
-{text_schema}
-{_format_text_entity_props_block(state)}
-OVERLAPPING LABELS (exist in BOTH layers as separate nodes): {', '.join(overlapping) if overlapping else 'none'}
-
-BRIDGE PATTERN:
-  Text entity to domain entity: (t:__Entity__:Label)-[:CORRESPONDS_TO]->(d:Label)
-  Text entity to chunk: (entity)-[:FROM_CHUNK]->(chunk:Chunk)
+{schema_context}
 
 IMPORTANT: Cypher has no GROUP BY — aggregation is implicit in WITH/RETURN.
 
@@ -598,36 +495,45 @@ async def _execute_validated_cypher(
     driver: Driver,
     cypher_query: str,
     question: str,
-    state: dict
+    state: dict,
+    schema=None,
 ) -> tuple[dict, str]:
     """Execute Cypher with cross-layer validation and guided regeneration.
 
-    Single entry point for cypher execution. Detects cross-layer violations
-    and attempts one regeneration before falling back to the original query.
+    When schema is provided, uses schema.validate_cypher() for validation
+    and schema.for_repair() for regeneration context.
 
     Args:
         driver: Neo4j driver instance
         cypher_query: Original Cypher query
         question: Original natural language question
         state: Pipeline state for layer classification
+        schema: Optional GraphSchema for validation
 
     Returns:
         (result_dict, correction_note) — correction_note is empty string
         if no violation, or describes the correction if regeneration fired.
     """
-    violation = _detect_cross_layer_violation(cypher_query, state)
-
     correction_note = ""
-    if violation:
-        try:
-            corrected = await _regenerate_cross_layer_cypher(
-                question, cypher_query, violation, state
-            )
-            correction_note = violation["message"]
-            cypher_query = corrected
-        except Exception:
-            # Regeneration failed — proceed with original query
-            pass
+
+    if schema is not None:
+        issues = schema.validate_cypher(cypher_query)
+        cross_layer_issues = [i for i in issues if i.issue_type == "cross_layer"]
+        if cross_layer_issues:
+            violation = {
+                "message": cross_layer_issues[0].message,
+                "domain_rels_used": set(),
+                "text_rels_used": set(),
+                "overlapping_labels": schema.overlapping_labels,
+            }
+            try:
+                corrected = await _regenerate_cross_layer_cypher(
+                    question, cypher_query, violation, state, schema=schema
+                )
+                correction_note = cross_layer_issues[0].message
+                cypher_query = corrected
+            except Exception:
+                pass
 
     result = _execute_cypher(driver, cypher_query)
     return result, correction_note
@@ -827,7 +733,8 @@ def _execute_cross_layer_traversal(
     driver: Driver,
     question: str,
     top_k: int = 5,
-    state: dict = None
+    state: dict = None,
+    schema=None,
 ) -> dict:
     """Hybrid search + entity traversal across text and domain layers.
 
@@ -868,9 +775,15 @@ def _execute_cross_layer_traversal(
             "Required for text-embedding-3-large embeddings."
         )
 
-    # Get labels from both layers
-    domain_labels = _get_domain_labels(state) if state else []
-    text_entities = _get_text_entities(state) if state else []
+    # Get labels from both layers (prefer schema, fall back to state)
+    domain_labels = (
+        schema.domain_labels if schema
+        else (_get_domain_labels(state) if state else [])
+    )
+    text_entities = (
+        schema.text_labels if schema
+        else (_get_text_entities(state) if state else [])
+    )
 
     if not domain_labels:
         raise RuntimeError(

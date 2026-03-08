@@ -9,9 +9,8 @@ Provides utilities for:
 """
 
 import logging
-import re
 from typing import Any
-from core.state import get_approved, has_approved
+from core.state import get_approved
 
 logger = logging.getLogger(__name__)
 
@@ -347,21 +346,6 @@ def _validate_read_only_cypher(cypher: str) -> None:
         )
 
 
-def _get_text_entity_properties(state: dict) -> dict:
-    """Return text entity schema from state.
-
-    Mirrors _get_domain_node_properties() for the text layer.
-
-    Args:
-        state: Pipeline state dictionary
-
-    Returns:
-        Dict mapping entity labels to their properties and sample values,
-        or empty dict if not available.
-    """
-    return state.get("text_entity_schema", {})
-
-
 def _introspect_text_schema(driver, state: dict) -> dict:
     """Sample text entity properties from the graph and store in state.
 
@@ -424,81 +408,143 @@ def _introspect_text_schema(driver, state: dict) -> dict:
     return schema
 
 
-def _get_layer_classification(state: dict) -> dict:
-    """Classify graph layers from state into domain and text sets.
+def _introspect_domain_schema(driver, state: dict) -> dict:
+    """Sample domain node properties from the graph and store in state.
+
+    For each node label in approved_construction_plan, queries one node
+    (excluding __Entity__ nodes) to discover property names and sample values.
+    Filters out embedding and __-prefixed properties.
+
+    Args:
+        driver: Neo4j driver instance
+        state: Pipeline state dictionary (modified in place)
 
     Returns:
-        {
-            "domain_labels": set,
-            "domain_rel_types": set,
-            "text_labels": set,
-            "text_rel_types": set,
-            "overlapping_labels": set,
-        }
+        The domain_node_schema dict (also stored in state)
     """
-    domain_labels = set(_get_domain_labels(state))
-    domain_rels = _get_domain_relationships(state)
-    domain_rel_types = {r["type"] for r in domain_rels}
+    plan = get_approved(state, "construction_plan")
+    if not plan:
+        state["domain_node_schema"] = {}
+        return {}
 
-    text_labels = set(_get_text_entities(state))
-    text_rels = _get_text_relationships(state)
-    text_rel_types = {r["type"] for r in text_rels}
+    labels = [
+        entry["label"]
+        for entry in plan.values()
+        if isinstance(entry, dict) and entry.get("construction_type") == "node"
+    ]
 
-    overlapping_labels = domain_labels & text_labels
+    schema = {}
+    try:
+        with driver.session() as session:
+            for label in labels:
+                result = session.run(
+                    f"MATCH (n:`{label}`) WHERE NOT n:`__Entity__` "
+                    f"RETURN keys(n) AS props, n LIMIT 1"
+                )
+                record = result.single()
+                if not record:
+                    continue
 
-    return {
-        "domain_labels": domain_labels,
-        "domain_rel_types": domain_rel_types,
-        "text_labels": text_labels,
-        "text_rel_types": text_rel_types,
-        "overlapping_labels": overlapping_labels,
-    }
+                raw_props = record["props"]
+                node = record["n"]
+
+                properties = {}
+                for prop in raw_props:
+                    if prop == "embedding" or prop.startswith("__"):
+                        continue
+                    value = node[prop]
+                    sample = str(value) if value is not None else ""
+                    if len(sample) > 100:
+                        sample = sample[:100]
+                    properties[prop] = {"sample": sample}
+
+                if properties:
+                    schema[label] = {"properties": properties}
+    except Exception as e:
+        logger.warning("Domain schema introspection failed: %s", e)
+        state["domain_node_schema"] = {}
+        return {}
+
+    state["domain_node_schema"] = schema
+    return schema
 
 
-def _detect_cross_layer_violation(cypher: str, state: dict) -> dict | None:
-    """Detect if a Cypher query spans both layers without CORRESPONDS_TO bridge.
+def _introspect_relationship_schema(driver, state: dict) -> dict:
+    """Sample relationship properties from the graph and store in state.
 
-    Returns None if query is valid (single-layer or properly bridged).
-    Returns violation dict if cross-layer without bridge.
+    For each domain relationship in approved_construction_plan and each text
+    relationship in approved_fact_types, queries one relationship instance to
+    discover property names and sample values. Filters out embedding and
+    __-prefixed properties.
+
+    Args:
+        driver: Neo4j driver instance
+        state: Pipeline state dictionary (modified in place)
+
+    Returns:
+        The relationship_schema dict (also stored in state)
     """
-    classification = _get_layer_classification(state)
-    domain_rel_types = classification["domain_rel_types"]
-    text_rel_types = classification["text_rel_types"]
+    schema = {}
 
-    # Single-layer graph: no cross-layer violation possible
-    if not domain_rel_types or not text_rel_types:
-        return None
+    # Domain relationships from construction plan
+    plan = get_approved(state, "construction_plan")
+    if plan:
+        for entry in plan.values():
+            if isinstance(entry, dict) and entry.get("construction_type") == "relationship":
+                rel_type = entry.get("relationship_type", "")
+                if not rel_type:
+                    continue
+                _introspect_single_rel(driver, rel_type, "", schema)
 
-    # Extract relationship types from Cypher via regex
-    # Handles [:TYPE], [r:TYPE], [:TYPE1|TYPE2]
-    raw_matches = re.findall(r'\[(?:\w+)?:\s*([^\]]+)\]', cypher)
-    used_rels = set()
-    for match in raw_matches:
-        for rel_type in match.split('|'):
-            cleaned = rel_type.strip()
-            if cleaned and cleaned.replace('_', '').isalnum():
-                used_rels.add(cleaned)
+    # Text relationships from fact types
+    fact_types = get_approved(state, "fact_types")
+    if fact_types:
+        for value in fact_types.values():
+            if isinstance(value, dict):
+                rel_type = value.get("predicate_label", "").upper()
+                if not rel_type:
+                    continue
+                _introspect_single_rel(driver, rel_type, "__Entity__", schema)
 
-    if not used_rels:
-        return None
+    state["relationship_schema"] = schema
+    return schema
 
-    domain_used = used_rels & domain_rel_types
-    text_used = used_rels & text_rel_types
 
-    # Not cross-layer if only one side is used
-    if not domain_used or not text_used:
-        return None
+def _introspect_single_rel(driver, rel_type: str, entity_filter: str, schema: dict):
+    """Introspect a single relationship type and add to schema dict."""
+    try:
+        if entity_filter:
+            query = (
+                f"MATCH (n:__Entity__)-[r:`{rel_type}`]->() "
+                f"RETURN keys(r) AS props, r LIMIT 1"
+            )
+        else:
+            query = (
+                f"MATCH ()-[r:`{rel_type}`]->() "
+                f"RETURN keys(r) AS props, r LIMIT 1"
+            )
+        with driver.session() as session:
+            result = session.run(query)
+            record = result.single()
+            if not record:
+                return
 
-    # Bridge is present — no violation
-    if "CORRESPONDS_TO" in used_rels:
-        return None
+            raw_props = record["props"]
+            rel = record["r"]
 
-    return {
-        "domain_rels_used": domain_used,
-        "text_rels_used": text_used,
-        "overlapping_labels": classification["overlapping_labels"],
-        "message": (
-            f"Cross-layer Cypher uses domain rels {sorted(domain_used)} "
-            f"and text rels {sorted(text_used)} without CORRESPONDS_TO bridge"
-        ),
-    }
+            properties = {}
+            for prop in raw_props:
+                if prop == "embedding" or prop.startswith("__"):
+                    continue
+                value = rel[prop]
+                sample = str(value) if value is not None else ""
+                if len(sample) > 100:
+                    sample = sample[:100]
+                properties[prop] = {"sample": sample}
+
+            if properties:
+                schema[rel_type] = {"properties": properties}
+    except Exception as e:
+        logger.warning("Relationship schema introspection failed for %s: %s", rel_type, e)
+
+

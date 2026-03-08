@@ -288,6 +288,25 @@ def _load_clean_state() -> dict:
     return {k: v for k, v in raw_state.items() if _should_persist(k)}
 
 
+# Module-level schema cache
+_schema_cache = None
+
+
+def _get_schema(state: dict, driver=None):
+    """Lazy build GraphSchema from state + optional driver. Cached."""
+    global _schema_cache
+    if _schema_cache is None:
+        from core.graph_schema import build_graph_schema
+        _schema_cache = build_graph_schema(state, driver)
+    return _schema_cache
+
+
+def _invalidate_schema():
+    """Clear cached schema (call after state changes)."""
+    global _schema_cache
+    _schema_cache = None
+
+
 def _save_state(state: dict) -> None:
     """Save state to disk, preserving artifacts and conversation keys.
 
@@ -1458,6 +1477,13 @@ def _build_structured(state, driver, conn_info):
             },
         }
 
+    # Introspect domain node and relationship properties for query context
+    from tools.query_tools import _introspect_domain_schema, _introspect_relationship_schema
+    _introspect_domain_schema(driver, state)
+    _introspect_relationship_schema(driver, state)
+    _save_state(state)
+    _invalidate_schema()
+
     verification = results["verification"]
     neo4j_version = conn_info.get("neo4j_version", "unknown")
     database = conn_info.get("database", "neo4j")
@@ -1550,6 +1576,7 @@ async def _build_unstructured(state, driver, message):
     from tools.query_tools import _introspect_text_schema
     _introspect_text_schema(driver, state)
     _save_state(state)  # Persist text_entity_schema
+    _invalidate_schema()
 
     # Create indexes after first successful file processing (Phase 3: US013)
     if results["files_processed"] and "_index_creation_attempted" not in state:
@@ -1649,6 +1676,7 @@ def _build_resolve(state, driver, message=""):
     from tools.query_tools import _introspect_text_schema
     _introspect_text_schema(driver, state)
     _save_state(state)  # Persist text_entity_schema
+    _invalidate_schema()
 
     labels_checked = results["labels_checked"]
     labels_resolved = results["labels_resolved"]
@@ -2031,6 +2059,7 @@ async def kg_query(question: str, context: str = "") -> dict:
         return guard
     from pipelines.query_builder import (
         _select_retrieval_strategy,
+        _generate_cypher_query,
         _execute_schema_query,
         _execute_cypher,
         _execute_validated_cypher,
@@ -2042,20 +2071,32 @@ async def kg_query(question: str, context: str = "") -> dict:
     try:
         state = _load_clean_state()
         driver = get_neo4j_driver()
+        schema = _get_schema(state, driver)
 
         try:
-            # Select strategy via Claude
-            strategy_data = await _select_retrieval_strategy(question, context, state)
+            # Select strategy via Claude (classification only)
+            strategy_data = await _select_retrieval_strategy(
+                question, context, state, schema=schema
+            )
             strategy = strategy_data["strategy"]
             params = strategy_data.get("parameters", {})
             reasoning = strategy_data.get("reasoning", "")
 
             # Execute selected strategy
             if strategy == "schema":
-                result = _execute_schema_query(driver, state)
+                result = _execute_schema_query(driver, state, schema=schema)
             elif strategy == "cypher":
+                # Generate Cypher in separate call when schema available
+                if schema is not None:
+                    cypher_query = await _generate_cypher_query(
+                        question, schema, context
+                    )
+                else:
+                    cypher_query = params.get("cypher_query", "")
+                    if not cypher_query:
+                        raise ValueError("Cypher strategy selected but no query generated")
                 result, correction_note = await _execute_validated_cypher(
-                    driver, params["cypher_query"], question, state
+                    driver, cypher_query, question, state, schema=schema
                 )
                 if correction_note:
                     reasoning += f" [{correction_note}]"
@@ -2064,10 +2105,10 @@ async def kg_query(question: str, context: str = "") -> dict:
             elif strategy == "hybrid":
                 result = _execute_hybrid_search(driver, question, params.get("top_k", 5))
             elif strategy == "cross_layer":
-                result = _execute_cross_layer_traversal(driver, question, params.get("top_k", 5), state)
+                result = _execute_cross_layer_traversal(driver, question, params.get("top_k", 5), state, schema=schema)
             else:
                 # Fallback to schema if unknown strategy
-                result = _execute_schema_query(driver, state)
+                result = _execute_schema_query(driver, state, schema=schema)
                 reasoning = f"Unknown strategy '{strategy}', falling back to schema"
 
             # Add status metadata
@@ -2096,7 +2137,7 @@ async def kg_query(question: str, context: str = "") -> dict:
         }
 
 
-def _classify_cqs_batch(cqs: dict, state: dict) -> dict:
+def _classify_cqs_batch(cqs: dict, state: dict, schema=None) -> dict:
     """Classify all CQs in a single Claude call.
 
     Makes one API call that receives all CQ questions and the graph schema,
@@ -2106,6 +2147,7 @@ def _classify_cqs_batch(cqs: dict, state: dict) -> dict:
     Args:
         cqs: {cq_id: cq_data} subset to classify.
         state: Pipeline state for schema context extraction.
+        schema: GraphSchema instance (preferred). Falls back to state if None.
 
     Returns:
         {cq_id: {"strategy": "cross_layer"|"cypher", "cypher_query": str|None}}
@@ -2114,52 +2156,55 @@ def _classify_cqs_batch(cqs: dict, state: dict) -> dict:
     import json as _json
     import anthropic
     from core.tracing import wrap_anthropic
-    from tools.query_tools import (
-        _get_domain_labels,
-        _get_domain_node_properties,
-        _get_domain_relationships,
-        _get_text_entities,
-        _get_text_relationships,
-        _validate_read_only_cypher,
-    )
+    from tools.query_tools import _validate_read_only_cypher
 
     fallback = {cq_id: {"strategy": "cross_layer", "cypher_query": None} for cq_id in cqs}
 
     try:
-        # Build schema context (same as _select_retrieval_strategy)
-        domain_labels = _get_domain_labels(state)
-        domain_node_props = _get_domain_node_properties(state)
-        domain_rels = _get_domain_relationships(state)
-        text_entities = _get_text_entities(state)
-        text_rels = _get_text_relationships(state)
+        # Build schema context from GraphSchema (canonical) or state (fallback)
+        if schema is not None:
+            graph_summary = schema.cypher_notation()
+        else:
+            from tools.query_tools import (
+                _get_domain_labels,
+                _get_domain_node_properties,
+                _get_domain_relationships,
+                _get_text_entities,
+                _get_text_relationships,
+            )
+            domain_labels = _get_domain_labels(state)
+            domain_node_props = _get_domain_node_properties(state)
+            domain_rels = _get_domain_relationships(state)
+            text_entities = _get_text_entities(state)
+            text_rels = _get_text_relationships(state)
 
-        graph_context = []
-        if domain_node_props:
-            lines = ["Domain nodes:"]
-            for label, props in domain_node_props.items():
-                if props:
-                    lines.append(f"  {label} [{', '.join(props)}]")
-                else:
-                    lines.append(f"  {label}")
-            graph_context.append("\n".join(lines))
-        elif domain_labels:
-            graph_context.append(f"Domain nodes: {', '.join(domain_labels)}")
-        if domain_rels:
-            rel_strs = []
-            for r in domain_rels:
-                s = f"{r['type']} ({r['from']} -> {r['to']}"
-                if r.get("properties"):
-                    s += f" [{', '.join(r['properties'])}]"
-                s += ")"
-                rel_strs.append(s)
-            graph_context.append(f"Domain relationships: {', '.join(rel_strs)}")
-        if text_entities:
-            graph_context.append(f"Text entities: {', '.join(text_entities[:5])}")
-        if text_rels:
-            rel_strs = [f"{r['type']} ({r['from']} -> {r['to']})" for r in text_rels]
-            graph_context.append(f"Text relationships: {', '.join(rel_strs)}")
+            graph_context = []
+            if domain_node_props:
+                lines = ["Domain nodes:"]
+                for label, props in domain_node_props.items():
+                    if props:
+                        lines.append(f"  {label} [{', '.join(props)}]")
+                    else:
+                        lines.append(f"  {label}")
+                graph_context.append("\n".join(lines))
+            elif domain_labels:
+                graph_context.append(f"Domain nodes: {', '.join(domain_labels)}")
+            if domain_rels:
+                rel_strs = []
+                for r in domain_rels:
+                    s = f"{r['type']} ({r['from']} -> {r['to']}"
+                    if r.get("properties"):
+                        s += f" [{', '.join(r['properties'])}]"
+                    s += ")"
+                    rel_strs.append(s)
+                graph_context.append(f"Domain relationships: {', '.join(rel_strs)}")
+            if text_entities:
+                graph_context.append(f"Text entities: {', '.join(text_entities[:5])}")
+            if text_rels:
+                rel_strs = [f"{r['type']} ({r['from']} -> {r['to']})" for r in text_rels]
+                graph_context.append(f"Text relationships: {', '.join(rel_strs)}")
 
-        graph_summary = "\n".join(graph_context) if graph_context else "(no graph built yet)"
+            graph_summary = "\n".join(graph_context) if graph_context else "(no graph built yet)"
 
         system_prompt = f"""You are a knowledge graph query classifier.
 
@@ -2248,6 +2293,7 @@ def _evaluate_single_cq(
     question: str,
     state: dict,
     strategy_result: dict | None = None,
+    schema=None,
 ) -> dict:
     """Evaluate a single competency question.
 
@@ -2303,7 +2349,7 @@ def _evaluate_single_cq(
                 result = _execute_hybrid_search(driver, question, top_k=5)
             elif strategy == "cross_layer":
                 result = _execute_cross_layer_traversal(
-                    driver, question, top_k=5, state=state
+                    driver, question, top_k=5, state=state, schema=schema
                 )
             else:
                 return []
@@ -2430,8 +2476,11 @@ def _run_cq_evaluation(cq_id: str = "", cq_ids: list[str] = None) -> dict:
         }
 
     try:
+        # Build canonical schema for CQ evaluation
+        schema = _get_schema(state, driver)
+
         # Classify all CQs in one Claude call before the evaluation loop
-        classifications = _classify_cqs_batch(cqs_to_evaluate, state)
+        classifications = _classify_cqs_batch(cqs_to_evaluate, state, schema=schema)
 
         results = []
         answerable_count = 0
@@ -2447,7 +2496,8 @@ def _run_cq_evaluation(cq_id: str = "", cq_ids: list[str] = None) -> dict:
                 cq_id_iter, {"strategy": "cross_layer", "cypher_query": None}
             )
             eval_result = _evaluate_single_cq(
-                driver, question, state, strategy_result=cq_strategy
+                driver, question, state, strategy_result=cq_strategy,
+                schema=schema,
             )
 
             evidence_count = eval_result["evidence_count"]

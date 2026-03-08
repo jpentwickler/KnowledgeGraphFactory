@@ -202,6 +202,7 @@ def _get_state_file() -> str:
 _driver = None
 _state: dict = {}
 _state_loaded = False
+_schema = None
 
 
 def _get_driver():
@@ -219,6 +220,15 @@ def _load_state_once() -> dict:
         _state = load_state(_get_state_file())
         _state_loaded = True
     return dict(_state)
+
+
+def _get_schema():
+    """Lazy-init GraphSchema from cached state + driver."""
+    global _schema
+    if _schema is None:
+        from core.graph_schema import build_graph_schema
+        _schema = build_graph_schema(_load_state_once(), _get_driver())
+    return _schema
 
 
 # =============================================================================
@@ -276,6 +286,7 @@ async def _run_kg_query(question: str, context: str = "") -> dict:
 
     from pipelines.query_builder import (
         _select_retrieval_strategy,
+        _generate_cypher_query,
         _execute_schema_query,
         _execute_cypher,
         _execute_validated_cypher,
@@ -287,19 +298,31 @@ async def _run_kg_query(question: str, context: str = "") -> dict:
     try:
         driver = _get_driver()
         state = _load_state_once()
+        schema = _get_schema()
 
-        # Select strategy via Claude
-        strategy_data = await _select_retrieval_strategy(question, context, state)
+        # Select strategy via Claude (classification only)
+        strategy_data = await _select_retrieval_strategy(
+            question, context, state, schema=schema
+        )
         strategy = strategy_data["strategy"]
         params = strategy_data.get("parameters", {})
         reasoning = strategy_data.get("reasoning", "")
 
         # Execute selected strategy
         if strategy == "schema":
-            result = _execute_schema_query(driver, state)
+            result = _execute_schema_query(driver, state, schema=schema)
         elif strategy == "cypher":
+            # Generate Cypher in separate call when schema available
+            if schema is not None:
+                cypher_query = await _generate_cypher_query(
+                    question, schema, context
+                )
+            else:
+                cypher_query = params.get("cypher_query", "")
+                if not cypher_query:
+                    raise ValueError("Cypher strategy selected but no query generated")
             result, correction_note = await _execute_validated_cypher(
-                driver, params["cypher_query"], question, state
+                driver, cypher_query, question, state, schema=schema
             )
             if correction_note:
                 reasoning += f" [{correction_note}]"
@@ -308,10 +331,10 @@ async def _run_kg_query(question: str, context: str = "") -> dict:
         elif strategy == "hybrid":
             result = _execute_hybrid_search(driver, question, params.get("top_k", 5))
         elif strategy == "cross_layer":
-            result = _execute_cross_layer_traversal(driver, question, params.get("top_k", 5), state)
+            result = _execute_cross_layer_traversal(driver, question, params.get("top_k", 5), state, schema=schema)
         else:
             # Fallback to schema if unknown strategy
-            result = _execute_schema_query(driver, state)
+            result = _execute_schema_query(driver, state, schema=schema)
             reasoning = f"Unknown strategy '{strategy}', falling back to schema"
 
         # Add status metadata
@@ -347,8 +370,9 @@ def _run_kg_graph_info() -> dict:
 
     driver = _get_driver()
     state = _load_state_once()
+    schema = _get_schema()
 
-    result = _execute_schema_query(driver, state)
+    result = _execute_schema_query(driver, state, schema=schema)
 
     return {
         "schema": result["answer"],
@@ -384,10 +408,10 @@ async def kg_query(question: str, context: str = "") -> dict:
 
     Examples:
         kg_query("What labels exist in the graph?")
-        kg_query("Which suppliers provide oak lumber?")
-        kg_query("Tell me about supply chain delays")
-        kg_query("What about delivery times?",
-                 context="Previous answer mentioned Supplier A and B")
+        kg_query("Which entities are connected to node X?")
+        kg_query("Tell me about recent issues")
+        kg_query("What about the timeline?",
+                 context="Previous answer mentioned Entity A and B")
     """
     t0 = time.time()
     result = await _run_kg_query(question, context)

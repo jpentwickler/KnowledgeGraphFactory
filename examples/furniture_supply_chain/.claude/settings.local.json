@@ -15,7 +15,8 @@
       "WebFetch(domain:docs.anthropic.com)",
       "WebFetch(domain:github.com)",
       "WebFetch(domain:raw.githubusercontent.com)",
-      "mcp__kg-factory__kg_query"
+      "mcp__kg-factory__kg_query",
+      "Bash(grep:*)"
     ]
   },
   "enableAllProjectMcpServers": true,
