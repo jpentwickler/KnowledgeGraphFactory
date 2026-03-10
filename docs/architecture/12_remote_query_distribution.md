@@ -1,9 +1,9 @@
 # Remote Query Distribution: Plug-and-Play Cowork Plugin
 
-> **Status**: Proposal
+> **Status**: Implemented (US021 + US022), OpenClaw planned (US024)
 > **Depends on**: US013 (Query Infrastructure), US015 (Query Agent)
 > **Related**: `07_kg_query_mcp_server.md`, `08_query_agent_openclaw.md`
-> **Goal**: Non-developer end users install a Cowork plugin and query a knowledge graph — no Python, no API keys, no configuration
+> **Goal**: Non-developer end users install a Cowork plugin or connect via OpenClaw and query a knowledge graph — no Python, no API keys, no configuration
 
 ---
 
@@ -48,7 +48,7 @@ Not distributable. Not portable. Not plug-and-play.
 ## Solution: Remote MCP Server
 
 Move the query server from a **local stdio process** to a **hosted HTTP service**.
-The Cowork plugin becomes a thin pointer to a URL:
+Both Cowork and OpenClaw become thin pointers to a URL:
 
 ```
 End User (Cowork)                    Hosted Infrastructure
@@ -60,9 +60,19 @@ End User (Cowork)                    Hosted Infrastructure
 │  │ SKILL.md       │ │ ◄───────── │    ├─► Neo4j (queries)       │
 │  └────────────────┘ │            │    └─► OpenAI (embeddings)   │
 └─────────────────────┘             └──────────────────────────────┘
+                                          ▲
+End User (WhatsApp/Telegram)              │
+┌─────────────────────┐             ┌─────┴────────────────────────┐
+│  OpenClaw (Railway)  │   HTTPS    │                               │
+│  ┌────────────────┐ │ ─────────► │  Same server, same endpoint   │
+│  │ mcp-adapter    │ │ Streamable │  Both platforms share the     │
+│  │ url: https://… │ │ HTTP       │  KG-Query Railway instance    │
+│  │ SKILL.md       │ │ ◄───────── │                               │
+│  └────────────────┘ │            └───────────────────────────────┘
+└─────────────────────┘
                                           │
 No Python on user machine.           All credentials server-side.
-No API keys in plugin.               State file lives here.
+No API keys in plugin/config.         State file lives here.
 Just install + use.
 ```
 
@@ -161,10 +171,10 @@ the current MCP standard since spec revision 2025-03-26).
 balancers, and is the transport that Claude Code and Cowork connect to for
 remote servers.
 
-**Current code** (`query_server.py` lines 255-265):
+**Current code** (`query_server.py`):
 ```python
 if args.http:
-    mcp.run(transport="sse", host="0.0.0.0", port=args.port)
+    mcp.run(transport="streamable-http", host="0.0.0.0", port=args.port)
 else:
     mcp.run()
 ```
@@ -556,11 +566,11 @@ User installs with: **Plugins > Add marketplace > paste GitHub URL > Install kg-
    docker push ghcr.io/kg-factory/kg-query:latest
    railway up  (or fly deploy, or gcloud run deploy)
 3. Generate auth token for the end user
-4. Send user:  plugin zip + token
-   (or: marketplace URL + token)
+4. Send user:  plugin zip + token  (Cowork)
+   (or: openclaw.json snippet + token  (OpenClaw))
 ```
 
-### For the End User (non-developer)
+### For the Cowork End User (desktop)
 
 ```
 1. Open Cowork
@@ -569,12 +579,24 @@ User installs with: **Plugins > Add marketplace > paste GitHub URL > Install kg-
 4. Start chatting:
    "What suppliers provide oak lumber?"
    "Show me the defect trends for Q3"
+```
+
+### For the OpenClaw End User (messaging channels)
+
+```
+1. Deploy OpenClaw on Railway (one-click template)
+2. Configure mcp-adapter with KG-Query server URL
+3. Set KG_QUERY_TOKEN in ~/.openclaw/.env
+4. Install SKILL.md in workspace skills directory
+5. Connect messaging channel (Telegram, WhatsApp, Slack, Discord)
+6. Start chatting from any connected channel:
+   "What suppliers provide oak lumber?"
    "Which products are affected by the recall?"
 ```
 
-**Zero Python. Zero API keys. Zero configuration beyond one token.**
+**Zero Python. Zero API keys. Zero local installation.**
 
-### Fully Zero-Config Variant
+### Fully Zero-Config Variant (Cowork)
 
 If the developer bakes the token into the plugin (acceptable for internal use):
 
@@ -599,20 +621,46 @@ User experience: **Upload plugin. Done.** Literally two clicks.
 ## Implementation Sequence
 
 ```
-WP1  Transport upgrade    ██░░░░░░░░  1-2h   prerequisite
+WP1  Transport upgrade    ██████████  DONE (US021)
  │
- ├──► WP2  Authentication  ████░░░░░░  3-5h   blocks external use
+ ├──► WP2  Authentication  ██████████  DONE (US021 - BearerTokenMiddleware)
  │
- └──► WP4  Docker image    ███░░░░░░░  2-3h   blocks deployment
+ └──► WP4  Docker image    ██████████  DONE (US021 - Dockerfile.query)
        │
-       ├──► WP3  Hardening ████░░░░░░  3-4h   incremental
+       ├──► WP3  Hardening ██████████  DONE (US021 - health, validation, shutdown)
        │
-       └──► WP5  Deploy    ██░░░░░░░░  1-2h   needs WP1+WP4
+       └──► WP5  Deploy    ██████████  DONE (US022 - railway.json, fly.toml)
              │
-             └──► WP6  Plugin  ██░░░░░░░░  1-2h   final step
+             ├──► WP6  Cowork Plugin  ██████████  DONE (US022 - cowork-local, cowork-remote)
+             │
+             └──► WP7  OpenClaw       ░░░░░░░░░░  PLANNED (US024 - openclaw-remote, Railway)
+```
 
-Critical path: WP1 → WP4 → WP5 → WP6      (~6h minimum viable)
-Full path:     WP1 → WP2 → WP3 → WP4 → WP5 → WP6  (~15h with auth + hardening)
+### Plugin Directory Structure (US022, US024)
+
+```
+plugins/
+├── cowork-local/           # stdio plugin for developers
+│   ├── .claude-plugin/
+│   │   └── plugin.json
+│   ├── .mcp.json           # env var placeholders
+│   └── skills/knowledge-graph/SKILL.md
+├── cowork-remote/          # HTTP plugin for Cowork end users
+│   ├── .claude-plugin/
+│   │   └── plugin.json
+│   ├── .mcp.json           # URL + token placeholder
+│   └── skills/knowledge-graph/SKILL.md
+├── openclaw-remote/        # HTTP config for OpenClaw on Railway (US024)
+│   ├── openclaw.json.example  # mcp-adapter config snippet
+│   ├── skills/knowledge-graph/SKILL.md
+│   └── README.md
+├── marketplace/
+│   └── .claude-plugin/
+│       └── marketplace.json
+└── README.md
+
+scripts/
+└── generate_plugin.py      # Generate per-customer plugin (Cowork + OpenClaw)
 ```
 
 ---

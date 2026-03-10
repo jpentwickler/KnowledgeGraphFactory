@@ -137,7 +137,68 @@ properties rather than free-text descriptions per entity).
 
 ---
 
-### Priority 3: Post-Build Graph Hygiene Filtering
+### Priority 3: Entity Property Name Constraints in Text Extraction
+
+**Source**: Investigation of Reviewer node inconsistency (`name` vs `username`)
+during cross-layer query testing (March 2026).
+
+**Problem**: `build_entity_schema()` in `pipelines/text_builder.py` passes only
+node labels (e.g., `["Product", "Part", "Reviewer"]`) to GPT-4o for extraction,
+but never specifies what properties each entity type should have. GPT-4o invents
+property names non-deterministically — the same Reviewer entity gets `name` in
+one file and `username` in another. This causes:
+
+1. Schema introspection (`_introspect_text_schema`) reports whichever property
+   variant `LIMIT 1` happens to sample
+2. Cypher queries filtering on a specific property miss nodes that used a
+   different name for the same concept
+3. Entity resolution key correlation (`rapidfuzz`) may pick the wrong key pair
+   when the same semantic field has multiple names
+
+**Root cause**: `approved_entity_types` stores only label names and descriptions,
+not property specifications. `build_entity_schema()` builds the
+`SimpleKGPipeline` schema from these labels alone — GPT-4o fills in properties
+ad hoc during extraction.
+
+**Proposed fix**:
+
+1. Extend `approved_entity_types` to include an optional `properties` field per
+   entity type (list of `{name, description}` dicts)
+2. Update `build_entity_schema()` to pass property constraints to
+   `SimpleKGPipeline` when available
+3. Update `kg_ner_extraction` prompt to propose properties alongside entity types
+4. Update `kg_fact_extraction` prompt similarly for relationship properties
+
+```
+Current approved_entity_types:
+  {"Reviewer": {"description": "A person who wrote a review"}}
+
+Target:
+  {"Reviewer": {
+    "description": "A person who wrote a review",
+    "properties": [
+      {"name": "username", "description": "The reviewer's handle or screen name"},
+      {"name": "location", "description": "Where the reviewer is based"}
+    ]
+  }}
+```
+
+**Why**: Fixes non-determinism at the source. Without property constraints,
+every text extraction run can produce a different property schema for the same
+entity type, making Cypher generation unreliable and entity resolution brittle.
+This is a prerequisite for industrial-mode reproducibility.
+
+**Scope**: Changes to `agents/ner_extraction.py` (prompt + tool schema),
+`agents/fact_extraction.py` (prompt + tool schema), `pipelines/text_builder.py`
+(`build_entity_schema()`), and `mcp_server/server.py` (state shape). ~15 tests.
+
+**Effort**: Medium. Requires prompt engineering for the NER/Fact agents to
+propose good properties, and backward compatibility with existing states that
+lack the `properties` field.
+
+---
+
+### Priority 4: Post-Build Graph Hygiene Filtering
 
 **What**: Two Cypher passes run automatically at the end of `build_text_graph()`:
 
@@ -161,7 +222,7 @@ detail.
 
 ---
 
-### Priority 4: Intra-Graph Entity Description Consolidation
+### Priority 5: Intra-Graph Entity Description Consolidation
 
 **What**: After `build_text_graph()`, find entity nodes merged from multiple
 chunks, collect all descriptions GPT-4o assigned them across chunks, and make
@@ -185,7 +246,7 @@ detail including the detection query and batch prompt design.
 
 ---
 
-### Priority 5: Context-Aware Per-File Processing + Bin-Packing
+### Priority 6: Context-Aware Per-File Processing + Bin-Packing
 
 **Source**: Extraction Quality Roadmap Phase 3 (`11_extraction_quality_roadmap.md`)
 
@@ -202,7 +263,7 @@ loses context and wastes API calls. This is a scaling prerequisite.
 
 ---
 
-### Priority 6: Second Real Use Case
+### Priority 7: Second Real Use Case
 
 Build a KG for a domain you actually care about. Validate Priorities 1-4 with
 real data. The approved schema from this use case becomes the first entry in
@@ -215,7 +276,7 @@ the schema template library.
 The transition from exploration tool to production system. These items create
 the "industrial mode" that runs without conversation.
 
-### Priority 7: GraphRAG Community Summaries for Global Query Answering
+### Priority 8: GraphRAG Community Summaries for Global Query Answering
 
 **What**: After `build_text_graph()`, run the Louvain algorithm (via Neo4j GDS)
 on the text layer to assign a `community_id` property to each `Chunk` and
@@ -245,7 +306,7 @@ Aura). No new Python dependencies.
 
 ---
 
-### Priority 8: Schema Template Library
+### Priority 9: Schema Template Library
 
 **Concept**: Extract reusable schema templates from completed KGs. A template
 captures the approved artifacts from a domain that's been through exploration:
@@ -276,7 +337,7 @@ import function from template to state, CLI or API entry point.
 
 ---
 
-### Priority 9: Headless Pipeline Runner
+### Priority 10: Headless Pipeline Runner
 
 **Concept**: A single function that takes config + data and produces a KG
 without any agent conversation:
@@ -310,7 +371,7 @@ build report.
 
 ---
 
-### Priority 10: Automated Quality Gate
+### Priority 11: Automated Quality Gate
 
 **Concept**: After headless build, automatically run CQ evaluation and fail
 the build if coverage score drops below a threshold. This replaces human
@@ -345,7 +406,7 @@ headless pipeline with threshold configuration.
 The query layer is the API contract for domain-specific agents. It must be
 reliable, fast, and structured for agent consumption.
 
-### Priority 11: Structured Query Results for Domain Agents
+### Priority 12: Structured Query Results for Domain Agents
 
 **Concept**: Domain agents need structured data, not just text chunks. Add a
 query mode that returns entities, properties, paths, and aggregates as JSON:
@@ -380,7 +441,7 @@ parameter in kg_query / query_server.
 
 ---
 
-### Priority 12: Deterministic Strategy Selection
+### Priority 13: Deterministic Strategy Selection
 
 **Concept**: Replace Claude-based strategy selection with rule-based selection
 grounded in retrieval hints (computed from data characteristics after build).
@@ -409,7 +470,7 @@ a conversation with an end user and can't wait for strategy selection.
 
 ---
 
-### Priority 13: Production Query Server
+### Priority 14: Production Query Server
 
 **Concept**: Evolve `query_server.py` from a dev tool (2 MCP tools,
 in-memory sessions) into a production service:
@@ -436,7 +497,7 @@ realized. Some groundwork exists in `docs/architecture/12_remote_query_distribut
 
 Building multiple domain KGs and composing them into a unified knowledge base.
 
-### Priority 14: Multi-Use-Case Merge Tool (kg_merge)
+### Priority 15: Multi-Use-Case Merge Tool (kg_merge)
 
 **Source**: `09_multi_use_case_integration.md`
 
@@ -458,7 +519,7 @@ interaction for conflict resolution.
 
 ---
 
-### Priority 15: Schema Template Inheritance
+### Priority 16: Schema Template Inheritance
 
 **Concept**: Templates can extend other templates. A "retail supply chain"
 template inherits from "supply chain" and adds retail-specific types:

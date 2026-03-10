@@ -1,0 +1,7 @@
+{
+  "name": "kg-query-local",
+  "version": "1.0.0",
+  "description": "Query a domain knowledge graph built with KG-Factory (local stdio variant for developers)",
+  "author": { "name": "KG-Factory" },
+  "keywords": ["knowledge-graph", "neo4j", "query", "local"]
+}

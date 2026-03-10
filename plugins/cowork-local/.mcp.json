@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "domain-kg": {
+      "command": "python",
+      "args": ["-m", "mcp_server.query_server"],
+      "env": {
+        "PYTHONPATH": "${KG_FACTORY_DIR}",
+        "KG_STATE_DIR": "${KG_STATE_DIR}",
+        "NEO4J_URI": "${NEO4J_URI}",
+        "NEO4J_USER": "${NEO4J_USER}",
+        "NEO4J_PASSWORD": "${NEO4J_PASSWORD}",
+        "OPENAI_API_KEY": "${OPENAI_API_KEY}",
+        "ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY}"
+      }
+    }
+  }
+}

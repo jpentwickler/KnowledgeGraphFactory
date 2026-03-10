@@ -12,6 +12,7 @@ ENV/
 .env
 .env.local
 .mcp.json
+!plugins/**/.mcp.json
 
 # IDE
 .vscode/
@@ -22,6 +23,7 @@ ENV/
 # State files (generated during testing/runtime)
 state_after_*.json
 **/state/current_state.json
+!/state/current_state.json
 
 # Jupyter
 .ipynb_checkpoints/

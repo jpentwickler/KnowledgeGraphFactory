@@ -1,7 +1,0 @@
-{
-  "name": "kg-query",
-  "version": "0.1.0",
-  "description": "Query a domain knowledge graph built with KG-Factory. Provides conversational access to structured and unstructured data through semantic search, keyword matching, entity traversal, and Cypher queries.",
-  "author": "KG-Factory",
-  "claude_plugin_version": "1"
-}

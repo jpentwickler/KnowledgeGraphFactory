@@ -1,0 +1,18 @@
+{
+  "name": "kg-factory-plugins",
+  "owner": { "name": "KG-Factory" },
+  "metadata": {
+    "description": "Knowledge graph tools for Claude",
+    "pluginRoot": "./plugins"
+  },
+  "plugins": [
+    {
+      "name": "kg-query",
+      "source": "./plugins/kg-query",
+      "description": "Query knowledge graphs with adaptive retrieval",
+      "version": "1.0.0",
+      "category": "data",
+      "tags": ["knowledge-graph", "neo4j", "query"]
+    }
+  ]
+}

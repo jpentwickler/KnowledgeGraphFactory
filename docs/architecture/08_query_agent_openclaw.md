@@ -287,18 +287,17 @@ The Query MCP Server is platform-agnostic. It can be deployed to any MCP-compati
 | Aspect | Claude Cowork | OpenClaw |
 |--------|--------------|----------|
 | **Type** | Desktop agent (Claude Desktop) | Headless daemon (Node.js) |
-| **MCP format** | `.mcp.json` (same as Claude Code) | `openclaw.json` (mcp-adapter) |
+| **MCP transport** | HTTP via `.mcp.json` | HTTP via `mcp-adapter` plugin |
 | **Skill format** | `SKILL.md` (progressive disclosure) | `SKILL.md` (selective injection) |
-| **Packaging** | Plugin (`.claude-plugin/plugin.json`) | Manual config |
+| **Packaging** | Plugin dir (`.claude-plugin/` + `.mcp.json`) | `openclaw.json` config + workspace skill |
 | **Sub-agents** | Native (parallel spawning) | Native (`sessions_spawn`) |
 | **Sandboxing** | Full Linux VM (VZVirtualMachine) | Tool-level allow/deny lists |
 | **Chat channels** | None (desktop only) | WhatsApp, Telegram, Slack, Discord |
 | **LLM** | Claude only | Any (Claude, GPT-4, Gemini, local) |
-| **Status** | Research preview (Jan 2026) | Stable |
-| **Cost** | Claude Pro $20/mo+ (includes Cowork) | Free (self-hosted) + LLM API costs |
-| **Audience** | Knowledge workers (non-developers) | Power users, developers |
-| **Deployment** | Desktop app required | Runs as background service |
-| **Audit/compliance** | No audit logs (research preview) | Self-hosted, full control |
+| **Cost** | Claude Pro $20/mo+ (includes Cowork) | ~$5/mo (Railway) + LLM API costs |
+| **Audience** | Knowledge workers (non-developers) | Teams, multi-channel access |
+| **Deployment** | Desktop app (user's machine) | Railway (cloud, one-click template) |
+| **Audit/compliance** | Anthropic-managed | Self-hosted, full control |
 
 ### When to Choose Which
 
@@ -397,45 +396,63 @@ Mitigation:
 
 ## OpenClaw Integration
 
+### Deployment Model: Fully Cloud-Hosted
+
+OpenClaw runs on Railway (or any cloud host) as a headless daemon. It
+connects to the KG-Query server — also on Railway — via HTTP MCP transport.
+No local installation is required.
+
+```
+User (WhatsApp / Telegram / Slack / Discord)
+    |
+    v
+OpenClaw (Railway instance 1)
+    |  mcp-adapter (HTTP transport)
+    v
+KG-Query Server (Railway instance 2, US021/US022)
+    |  query_builder.py strategies
+    v
+Neo4j AuraDB
+```
+
 ### Three Integration Tiers
 
 OpenClaw provides three mechanisms for consuming external tools. They work together, not as alternatives:
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│                     OpenClaw Gateway                      │
-│                                                           │
-│   Tier 1: MCP Connection        Tier 2: Skill            │
-│   (transport layer)             (judgment layer)          │
-│   ┌──────────────────┐         ┌──────────────────┐      │
-│   │ mcp-adapter or   │         │ SKILL.md         │      │
-│   │ native mcp.srv   │         │ "when to use     │      │
-│   │                  │         │  the KG"         │      │
-│   │ kg_chat          │         │                  │      │
-│   │ kg_graph_info    │         │ Injected when    │      │
-│   │                  │         │ question matches │      │
-│   └────────┬─────────┘         └──────────────────┘      │
-│            │                                              │
-│   Tier 3: Sub-Agent                                      │
-│   (deep research)                                        │
-│   ┌──────────────────┐                                   │
-│   │ Spawned for      │                                   │
-│   │ complex multi-   │                                   │
-│   │ query analysis   │                                   │
-│   │ tasks            │                                   │
-│   └──────────────────┘                                   │
-│                                                           │
-└──────────────────────────────────────────────────────────┘
++----------------------------------------------------------+
+|           OpenClaw Gateway (Railway)                      |
+|                                                           |
+|   Tier 1: MCP Connection        Tier 2: Skill            |
+|   (HTTP transport)              (judgment layer)          |
+|   +------------------+         +------------------+      |
+|   | mcp-adapter      |         | SKILL.md         |      |
+|   |  HTTP -> remote   |         | "when to use     |      |
+|   |  KG-Query server  |         |  the KG"         |      |
+|   |                  |         |                  |      |
+|   | kg_query         |         | Injected when    |      |
+|   | kg_graph_info    |         | question matches |      |
+|   +--------+---------+         +------------------+      |
+|            |                                              |
+|   Tier 3: Sub-Agent                                      |
+|   (deep research)                                        |
+|   +------------------+                                   |
+|   | Spawned for      |                                   |
+|   | complex multi-   |                                   |
+|   | query analysis   |                                   |
+|   | tasks            |                                   |
+|   +------------------+                                   |
+|                                                           |
++----------------------------------------------------------+
 ```
 
-### Tier 1: MCP Connection (Transport)
+### Tier 1: MCP Connection (HTTP Transport)
 
-Gives OpenClaw's agent access to `kg_chat` and `kg_graph_info` as callable tools.
-
-**Option A — `mcp-adapter` plugin** (recommended, most stable):
+Gives OpenClaw's agent access to `kg_query` and `kg_graph_info` as callable
+tools via the `mcp-adapter` plugin with HTTP transport.
 
 ```jsonc
-// ~/.openclaw/openclaw.json
+// $OPENCLAW_STATE_DIR/openclaw.json (e.g. /data/.openclaw/openclaw.json on Railway)
 {
   "plugins": {
     "entries": {
@@ -446,15 +463,10 @@ Gives OpenClaw's agent access to `kg_chat` and `kg_graph_info` as callable tools
           "servers": [
             {
               "name": "domain-kg",
-              "transport": "stdio",
-              "command": "python",
-              "args": ["-m", "mcp_server.query_server"],
-              "env": {
-                "NEO4J_URI": "${NEO4J_URI}",
-                "NEO4J_USER": "${NEO4J_USER}",
-                "NEO4J_PASSWORD": "${NEO4J_PASSWORD}",
-                "OPENAI_API_KEY": "${OPENAI_API_KEY}",
-                "ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY}"
+              "transport": "http",
+              "url": "https://kg-query-production.up.railway.app/mcp",
+              "headers": {
+                "Authorization": "Bearer ${KG_QUERY_TOKEN}"
               }
             }
           ]
@@ -465,98 +477,38 @@ Gives OpenClaw's agent access to `kg_chat` and `kg_graph_info` as callable tools
 }
 ```
 
-With `toolPrefix: true`, tools appear as `domain-kg_kg_chat` and `domain-kg_kg_graph_info`.
+With `toolPrefix: true`, tools appear as `domain-kg_kg_query` and `domain-kg_kg_graph_info`.
 
-**Option B — Native `mcp.servers`** (per-agent, may still be maturing):
+The `${KG_QUERY_TOKEN}` placeholder is resolved from `$OPENCLAW_STATE_DIR/.env`
+at runtime. No API keys or Neo4j credentials are needed on the OpenClaw
+instance — all credentials live on the KG-Query server.
 
-```jsonc
-// ~/.openclaw/openclaw.json
-{
-  "agents": {
-    "list": [
-      {
-        "id": "main",
-        "default": true,
-        "mcp": {
-          "servers": [
-            {
-              "name": "domain-kg",
-              "command": "python",
-              "args": ["-m", "mcp_server.query_server"],
-              "env": {
-                "NEO4J_URI": "bolt://localhost:7687",
-                "NEO4J_USER": "neo4j",
-                "NEO4J_PASSWORD": "password",
-                "OPENAI_API_KEY": "sk-...",
-                "ANTHROPIC_API_KEY": "sk-ant-..."
-              }
-            }
-          ]
-        }
-      }
-    ]
-  }
-}
-```
-
-**What happens at startup**: OpenClaw spawns `python -m mcp_server.query_server` as a child process, communicates over stdio (JSON-RPC 2.0), calls `listTools()` to discover `kg_chat` and `kg_graph_info` with their descriptions and JSON schemas, and registers them as first-class tools.
+**What happens at startup**: OpenClaw loads the mcp-adapter plugin, connects
+to the remote KG-Query server over HTTP, calls `listTools()` to discover
+`kg_query` and `kg_graph_info` with their descriptions and JSON schemas, and
+registers them as first-class tools.
 
 ### Tier 2: Skill (Judgment)
 
 MCP gives OpenClaw access to tools. A Skill teaches it **when** to use them and **how** to interpret results.
 
-**File**: `~/.openclaw/skills/knowledge-graph/SKILL.md`
+**File**: `$OPENCLAW_WORKSPACE_DIR/skills/knowledge-graph/SKILL.md`
+(on Railway: `/data/workspace/skills/knowledge-graph/SKILL.md`)
 
-```markdown
----
-name: knowledge-graph
-description: >
-  Query a domain knowledge graph built with KG-Factory. Use when the user
-  asks about domain-specific data, business entities, relationships between
-  entities, or content from documents that have been indexed. Do NOT use
-  for general knowledge questions -- only for data in the user's graph.
+The same `SKILL.md` is shared between Cowork and OpenClaw — see
+`skills/knowledge-graph/SKILL.md` in the repo. It includes OpenClaw-specific
+metadata in the YAML frontmatter:
+
+```yaml
 metadata: {"openclaw":{"emoji":"graph","requires":{"env":["NEO4J_URI","ANTHROPIC_API_KEY","OPENAI_API_KEY"]}}}
----
-
-# Knowledge Graph Query
-
-Chat with your domain knowledge graph using natural language.
-
-## When to use this skill
-
-Use `kg_chat` when the user asks about:
-- Business entities (suppliers, products, customers, etc.)
-- Relationships between entities ("which suppliers provide X?")
-- Content from indexed documents (reviews, reports, specs)
-- Cross-referencing structured data with document content
-- Aggregations or counts over domain data
-
-Do NOT use for:
-- General knowledge ("what is Neo4j?")
-- Questions about files on disk (use filesystem tools)
-- Web searches (use web_search)
-
-## Tools
-
-### kg_chat(message, session_id)
-Conversational query with follow-up support. Maintains context per session.
-
-- Use the SAME session_id for related questions in one conversation
-- The agent handles strategy selection internally
-- Returns synthesized answers, not raw data
-
-### kg_graph_info()
-Quick check of what's in the graph. Call this first if unsure whether
-the graph has relevant data.
-
-## Tips
-
-- Start with kg_graph_info() to understand available data
-- Use specific entity names when you know them
-- Follow up with "tell me more about X" for deeper exploration
 ```
 
 **How OpenClaw uses Skills**: OpenClaw loads SKILL.md files at startup. The `description` field drives **selective injection** — the skill content is only added to the system prompt when the user's message matches the description semantically. "What furniture has quality issues?" injects the knowledge-graph skill; "set a timer for 5 minutes" does not. This keeps the prompt lean.
+
+Skills load from three locations with this hierarchy (highest to lowest):
+1. `$OPENCLAW_WORKSPACE_DIR/skills` (workspace — where we install)
+2. `$OPENCLAW_STATE_DIR/skills` (managed/local)
+3. Bundled skills (shipped with OpenClaw)
 
 ### Tier 3: Sub-Agent (Deep Research)
 
@@ -576,7 +528,7 @@ Main agent calls sessions_spawn:
   runTimeoutSeconds: 300
 ```
 
-The sub-agent runs in an isolated session with its own context window. It makes a series of `kg_chat` calls with a consistent `session_id`, compiles findings, and posts results back via the "announce step."
+The sub-agent runs in an isolated session with its own context window. It makes a series of `kg_query` calls, compiles findings, and posts results back via the "announce step."
 
 **Sub-agent tool restrictions**:
 
@@ -586,7 +538,7 @@ The sub-agent runs in an isolated session with its own context window. It makes 
     "subagents": {
       "tools": {
         "allow": [
-          "domain-kg_kg_chat",
+          "domain-kg_kg_query",
           "domain-kg_kg_graph_info"
         ],
         "deny": ["group:fs", "group:sessions", "exec"]
@@ -624,12 +576,12 @@ This restricts the sub-agent to ONLY the KG tools — it cannot read files, run 
     User can follow up directly in the same session
 ```
 
-### Example B: OpenClaw (WhatsApp)
+### Example B: OpenClaw on Railway (WhatsApp)
 
-End-to-end flow showing all layers:
+End-to-end flow showing all layers with cloud-hosted architecture:
 
 ```
-1. User sends WhatsApp message to OpenClaw:
+1. User sends WhatsApp message to OpenClaw (on Railway):
    "What did @home_chef say about the Stockholm chair?"
 
 2. OpenClaw Gateway receives via WhatsApp channel plugin
@@ -637,57 +589,50 @@ End-to-end flow showing all layers:
 3. Main agent processes the message:
    - Sees "knowledge-graph" skill is relevant (description match)
    - SKILL.md injected into system prompt
-   - Agent decides to call kg_chat
+   - Agent decides to call domain-kg_kg_query
 
-4. Agent calls:
-   kg_chat(
-     message="What did @home_chef say about the Stockholm chair?",
-     session_id="whatsapp-user-789"
+4. Agent calls (via mcp-adapter HTTP transport):
+   domain-kg_kg_query(
+     question="What did @home_chef say about the Stockholm chair?"
    )
 
-5. Query MCP Server receives the call:
-   - Loads/creates session "whatsapp-user-789"
-   - Pops conversation history for this session
-   - Passes message + conversation to QueryAgent.run()
+5. mcp-adapter sends HTTP request to KG-Query server (Railway instance 2):
+   POST https://kg-query-production.up.railway.app/mcp
+   Authorization: Bearer <token>
 
-6. QueryAgent (Claude) processes:
-   - System prompt describes 5 tools
-   - Recognizes: specific @mention + product -> search_entities
-   - Calls tool: search_entities("@home_chef Stockholm chair review")
-
-7. Tool handler executes:
-   - Calls _execute_cross_layer_traversal(driver, query, top_k=5, state)
+6. KG-Query server (query_server.py) processes:
+   - _select_retrieval_strategy() -> cross_layer
+   - _execute_cross_layer_traversal(driver, query, top_k=5, state)
    - HybridCypherRetriever: fulltext matches "@home_chef", vector matches
      semantics
    - FROM_CHUNK traversal finds entities
    - CORRESPONDS_TO links to Product:Stockholm
    - Returns 3 chunks with entity context
 
-8. Claude sees results, synthesizes:
+7. KG-Query returns result to OpenClaw via HTTP response:
+   {answer, evidence, confidence, status: {strategy: "cross_layer"}}
+
+8. Main agent synthesizes and relays the answer to the user via WhatsApp:
    "@home_chef posted two reviews about the Stockholm chair:
     - Praised the Scandinavian design and wood quality
     - Complained about assembly taking over 2 hours
     - Rated it 3/5 stars overall"
-
-9. QueryAgent returns (response, state, conversation)
-
-10. Query MCP Server:
-    - Stores updated conversation for session "whatsapp-user-789"
-    - Returns {answer, sources, confidence, strategies_used}
-
-11. Main agent relays the answer to the user via WhatsApp
 ```
 
-**Follow-up (same session)**:
+**Follow-up**: The KG-Query server is stateless — each call is independent.
+For follow-ups, OpenClaw passes relevant context from the previous answer
+via the `context` parameter:
 
 ```
-12. User: "Did they review any other furniture?"
+9. User: "Did they review any other furniture?"
 
-13. Same flow, same session_id
-    -> QueryAgent sees conversation history
-    -> Resolves "they" = @home_chef from turn context
-    -> Calls search_entities("@home_chef reviews furniture")
-    -> Synthesizes: "Yes, @home_chef also reviewed the Ektorp sofa..."
+10. Agent calls:
+    domain-kg_kg_query(
+      question="Did they review any other furniture?",
+      context="Previous answer: @home_chef reviewed the Stockholm chair"
+    )
+    -> KG-Query resolves the question with context
+    -> Returns: "Yes, @home_chef also reviewed the Ektorp sofa..."
 ```
 
 ---
@@ -751,30 +696,21 @@ Stays with developer (KG-Factory dev environment):
 ├── agents/competency_questions.py
 └── tests/
 
-Ships with the knowledge graph (to Cowork and/or OpenClaw):
-├── mcp_server/query_server.py     # 2-tool query server        (NEW)
-├── agents/query_agent.py          # Conversational query agent  (NEW)
-├── tools/query_agent_tools.py     # Tool schemas + handlers     (NEW)
-├── pipelines/query_builder.py     # Retriever functions         (SHARED)
-├── tools/query_tools.py           # Helper functions            (SHARED)
-├── core/agent.py                  # Agent runner                (SHARED)
-├── core/state.py                  # State utilities             (SHARED)
-├── core/tools.py                  # Tool execution              (SHARED)
-├── core/tracing.py                # Optional LangSmith          (SHARED)
-├── utils/neo4j_utils.py           # Driver utilities            (SHARED)
-├── state/current_state.json       # Built graph metadata        (OPTIONAL)
-├── skills/
-│   └── knowledge-graph/
-│       └── SKILL.md               # Shared skill definition     (NEW)
-└── plugins/
-    └── cowork/                    # Cowork plugin packaging      (NEW)
-        ├── .claude-plugin/
-        │   └── plugin.json
-        └── .mcp.json
+Deployed to Railway as Docker image (Dockerfile.query):
+├── mcp_server/query_server.py     # 2-tool query server (HTTP + auth)
+├── pipelines/query_builder.py     # Retriever functions
+├── tools/query_tools.py           # Helper functions
+├── core/state.py                  # State utilities
+├── core/tracing.py                # Optional LangSmith
+├── utils/neo4j_utils.py           # Driver utilities
+└── state/current_state.json       # Built graph metadata
 
-Platform-specific configuration (not in repo, user creates):
-├── Cowork:   Plugin installed to ~/.claude/plugins/ or loaded via SDK
-└── OpenClaw: openclaw.json + ~/.openclaw/skills/ (see installation guide)
+Platform-specific configuration:
+├── Cowork:   plugins/cowork-remote/ (.mcp.json -> HTTP URL)
+└── OpenClaw: plugins/openclaw-remote/ (openclaw.json -> HTTP URL)
+
+Both platforms connect to the same KG-Query Railway instance via HTTP.
+No Python, no API keys, no local installation on either platform.
 ```
 
 **SHARED** files are the same source files, not copies. If you improve `_execute_cross_layer_traversal`, the improvement flows to:
@@ -820,10 +756,12 @@ kg-factory/
 │       └── SKILL.md                # NEW: Shared skill (Cowork + OpenClaw)
 │
 ├── plugins/
-│   └── cowork/                     # NEW: Cowork plugin packaging
-│       ├── .claude-plugin/
-│       │   └── plugin.json         # Plugin manifest
-│       └── .mcp.json               # MCP server connection
+│   ├── cowork-local/               # Cowork (stdio, developer)
+│   ├── cowork-remote/              # Cowork (HTTP, end user)
+│   └── openclaw-remote/            # OpenClaw (HTTP, cloud-hosted)
+│       ├── openclaw.json.example   # mcp-adapter config snippet
+│       ├── skills/knowledge-graph/SKILL.md
+│       └── README.md
 │
 ├── tests/
 │   ├── unit/
@@ -891,9 +829,16 @@ kg-factory/
 ### 8. Dual-Platform Deployment (Cowork + OpenClaw)
 
 **Decision**: Support both Claude Cowork and OpenClaw as deployment targets with shared core and platform-specific packaging
-**Rationale**: The Query MCP Server is platform-agnostic (standard MCP over stdio). The only platform-specific artifacts are packaging (plugin.json for Cowork, openclaw.json for OpenClaw) and skill installation paths. Sharing one SKILL.md across both platforms minimizes maintenance.
-**Trade-off**: Cowork is desktop-only (no chat channels); OpenClaw is headless with multi-channel support. Users choose based on their deployment needs, or use both.
-**Alternative Rejected**: Picking one platform exclusively (loses users on the other platform; the marginal cost of supporting both is low since MCP is the shared transport)
+**Rationale**: The Query MCP Server is platform-agnostic (standard MCP over HTTP). Both platforms connect to the same Railway-hosted KG-Query instance. The only platform-specific artifacts are packaging (plugin.json + .mcp.json for Cowork, openclaw.json for OpenClaw) and skill installation paths. Sharing one SKILL.md across both platforms minimizes maintenance.
+**Trade-off**: Cowork is desktop-only (no chat channels); OpenClaw is cloud-hosted with multi-channel support (WhatsApp, Telegram, Slack, Discord). Users choose based on their deployment needs, or use both simultaneously against the same KG-Query server.
+**Alternative Rejected**: Picking one platform exclusively (loses users on the other platform; the marginal cost of supporting both is low since HTTP MCP is the shared transport)
+
+### 10. Cloud-Only OpenClaw Deployment
+
+**Decision**: OpenClaw deployed on Railway (no local installation)
+**Rationale**: The KG-Query server is already on Railway. Deploying OpenClaw on Railway too creates a fully cloud-hosted stack: no Python, no credentials, no installations on the user's machine. Railway provides one-click templates for OpenClaw, persistent volumes for state, and automatic HTTPS.
+**Trade-off**: Requires a Railway account (~$5/mo). Cannot use OpenClaw offline.
+**Alternative Rejected**: Local OpenClaw installation with stdio transport (requires Python, credentials on user machine, complex setup — contradicts the "zero-install" goal)
 
 ### 9. No LangChain Dependency
 

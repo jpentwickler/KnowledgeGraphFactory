@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "domain-kg": {
+      "type": "http",
+      "url": "https://considerate-rejoicing-production.up.railway.app/mcp",
+      "headers": {
+        "Authorization": "Bearer kg-query-2026-yourSecretHere"
+      }
+    }
+  }
+}

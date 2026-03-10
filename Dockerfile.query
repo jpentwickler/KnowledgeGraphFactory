@@ -27,9 +27,12 @@ RUN echo '"""Tools package (query-only stub)."""' > tools/__init__.py && \
     echo '"""Pipelines package (query-only stub)."""' > pipelines/__init__.py && \
     echo "" > mcp_server/__init__.py
 
+# State file: copy the graph schema for query strategy selection.
+# Place your project's current_state.json at state/ before building.
+COPY state/ state/
+
+ENV KG_STATE_DIR=/app/state
+
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
-
-CMD ["uvicorn", "mcp_server.query_server:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "uvicorn mcp_server.query_server:app --host 0.0.0.0 --port ${PORT:-8000}"]

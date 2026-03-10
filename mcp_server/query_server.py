@@ -30,8 +30,11 @@ _root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _root_dir)
 
 # Load .env from project root (provides ANTHROPIC_API_KEY, etc.)
+# In Docker / Railway, env vars are injected directly — skip if no .env file.
 from dotenv import load_dotenv
-load_dotenv(os.path.join(_root_dir, ".env"))
+_env_path = os.path.join(_root_dir, ".env")
+if os.path.isfile(_env_path):
+    load_dotenv(_env_path)
 
 # Pre-cache langsmith runtime env BEFORE FastMCP takes over stdin/stdout.
 # See mcp_server/server.py lines 22-38 for full explanation.

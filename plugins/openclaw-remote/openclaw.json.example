@@ -1,0 +1,22 @@
+{
+  "plugins": {
+    "entries": {
+      "mcp-adapter": {
+        "enabled": true,
+        "config": {
+          "toolPrefix": true,
+          "servers": [
+            {
+              "name": "domain-kg",
+              "transport": "http",
+              "url": "https://YOUR-KG-QUERY-URL.up.railway.app/mcp",
+              "headers": {
+                "Authorization": "Bearer ${KG_QUERY_TOKEN}"
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

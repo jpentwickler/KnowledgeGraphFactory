@@ -1,4 +1,5 @@
 # Minimal dependencies for query-only Docker image.
+# Cache bust: 2026-03-10
 # Does NOT include pandas, rapidfuzz, pytest (not needed for read-only queries).
 
 anthropic>=0.40.0

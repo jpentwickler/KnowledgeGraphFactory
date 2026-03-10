@@ -1,0 +1,16 @@
+.git
+examples
+data
+docs
+tests
+plugins
+tutorial
+templates
+scripts
+*.md
+.claude
+.pytest_cache
+__pycache__
+*.pyc
+.env
+.env.*

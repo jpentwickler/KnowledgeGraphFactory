@@ -4,6 +4,29 @@ User-facing guides and tutorials for working with KG-Factory agents.
 
 ---
 
+## Cowork Plugin Deployment
+
+**Location**: [deploy_cowork_plugin.md](deploy_cowork_plugin.md)
+
+Step-by-step guide to deploying the remote query server (Railway/Fly.io) and
+installing the Cowork plugin so end users can query your knowledge graph with
+zero technical setup. Covers server deployment, plugin generation, end user
+installation, and troubleshooting.
+
+---
+
+## OpenClaw Cloud Deployment
+
+**Location**: [deploy_openclaw.md](deploy_openclaw.md)
+
+Step-by-step guide to deploying OpenClaw on Railway and connecting it to the
+KG-Query server via HTTP MCP transport. End users query the knowledge graph
+from messaging channels (WhatsApp, Telegram, Slack, Discord) with no local
+installation. Covers OpenClaw Railway deployment, mcp-adapter configuration,
+SKILL.md installation, and messaging channel setup.
+
+---
+
 ## NER Extraction Agent Guides
 
 **Location**: [ner/](ner/)
