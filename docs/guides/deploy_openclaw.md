@@ -13,7 +13,8 @@ Before you start you need:
   with a working health check. Follow [Part 1 of the Cowork guide](deploy_cowork_plugin.md)
   if you haven't done this yet.
 - A **bearer token** matching one in the KG-Query server's `KG_AUTH_TOKENS`
-- A **Railway account** (for hosting OpenClaw)
+- A **Railway account** on the **Hobby plan or higher** ($5/month). The Trial
+  plan caps containers at 1 GB RAM, but OpenClaw requires at least 2 GB.
 - An account on at least one messaging channel: Telegram, WhatsApp, Slack, or
   Discord
 
@@ -67,8 +68,11 @@ If `mcp-adapter` is not already installed, add it via the OpenClaw setup
 wizard or CLI:
 
 ```bash
-openclaw plugins install mcp-adapter
+openclaw plugins install openclaw-mcp-adapter
 ```
+
+> **Note:** The npm package is `openclaw-mcp-adapter` (not `mcp-adapter`,
+> which is a name-squatted placeholder that fails to install).
 
 ### Step 2: Configure HTTP transport
 
@@ -102,6 +106,13 @@ configuration:
 ```
 
 Replace the URL with your actual KG-Query server endpoint.
+
+> **Shortcut:** You can generate this config automatically:
+> ```bash
+> python scripts/generate_plugin.py --url https://your-server.up.railway.app/mcp --platform openclaw
+> ```
+> This creates an `openclaw.json.example` with the URL pre-filled, plus the
+> SKILL.md and README. See [Generating a Plugin](../../plugins/README.md#generating-a-plugin).
 
 ### Step 3: Set the bearer token
 
@@ -197,6 +208,8 @@ KG queries and compiles a research report.
 | Empty results | Wrong state file on KG-Query | Redeploy KG-Query with the correct `current_state.json` |
 | Skill not activating | SKILL.md not in workspace | Verify file exists at `$OPENCLAW_WORKSPACE_DIR/skills/knowledge-graph/SKILL.md` |
 | No messages from channel | Channel not connected | Check messaging channel config in OpenClaw setup wizard |
+| "Gateway did not become ready" | Not enough RAM (< 2 GB) | Upgrade to Railway Hobby plan ($5/month); Trial plan's 1 GB cap is insufficient |
+| Gateway OOM crash loop | Node.js heap exceeds container limit | Set `NODE_OPTIONS=--max-old-space-size=2048` in Railway env vars |
 
 ---
 

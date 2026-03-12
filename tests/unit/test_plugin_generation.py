@@ -11,7 +11,15 @@ sys.path.insert(
     0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts")
 )
 
-from generate_plugin import PLUGIN_JSON, build_mcp_json, find_skill_md, generate
+from generate_plugin import (
+    PLUGIN_JSON,
+    build_mcp_json,
+    build_openclaw_json,
+    find_openclaw_readme,
+    find_skill_md,
+    generate,
+    generate_openclaw,
+)
 
 
 class TestBuildMcpJson:
@@ -129,3 +137,166 @@ class TestGenerate:
         output = str(tmp_path / "test-plugin")
         result = generate("https://example.com/mcp", None, output)
         assert result == output
+
+
+class TestBuildOpenClawJson:
+    """Tests for OpenClaw mcp-adapter config generation."""
+
+    def test_url_appears_in_server_config(self):
+        result = build_openclaw_json("https://example.com/mcp", None)
+        server = result["plugins"]["entries"]["mcp-adapter"]["config"]["servers"][0]
+        assert server["url"] == "https://example.com/mcp"
+
+    def test_transport_is_http(self):
+        result = build_openclaw_json("https://example.com/mcp", None)
+        server = result["plugins"]["entries"]["mcp-adapter"]["config"]["servers"][0]
+        assert server["transport"] == "http"
+
+    def test_placeholder_token_when_no_token(self):
+        result = build_openclaw_json("https://example.com/mcp", None)
+        server = result["plugins"]["entries"]["mcp-adapter"]["config"]["servers"][0]
+        assert server["headers"]["Authorization"] == "Bearer ${KG_QUERY_TOKEN}"
+
+    def test_baked_token_when_provided(self):
+        result = build_openclaw_json("https://example.com/mcp", "secret123")
+        server = result["plugins"]["entries"]["mcp-adapter"]["config"]["servers"][0]
+        assert server["headers"]["Authorization"] == "Bearer secret123"
+
+    def test_server_name_is_domain_kg(self):
+        result = build_openclaw_json("https://example.com/mcp", None)
+        server = result["plugins"]["entries"]["mcp-adapter"]["config"]["servers"][0]
+        assert server["name"] == "domain-kg"
+
+    def test_tool_prefix_is_true(self):
+        result = build_openclaw_json("https://example.com/mcp", None)
+        config = result["plugins"]["entries"]["mcp-adapter"]["config"]
+        assert config["toolPrefix"] is True
+
+
+class TestFindOpenClawReadme:
+    """Tests for OpenClaw README.md source resolution."""
+
+    def test_finds_readme(self):
+        path = find_openclaw_readme()
+        assert os.path.isfile(path)
+        assert path.endswith("README.md")
+
+
+class TestGenerateOpenClaw:
+    """Tests for OpenClaw config generation."""
+
+    def test_creates_openclaw_json_example(self, tmp_path):
+        output = str(tmp_path / "test-openclaw")
+        generate_openclaw("https://example.com/mcp", None, output)
+
+        assert os.path.isfile(os.path.join(output, "openclaw.json.example"))
+
+    def test_does_not_create_claude_plugin_dir(self, tmp_path):
+        output = str(tmp_path / "test-openclaw")
+        generate_openclaw("https://example.com/mcp", None, output)
+
+        assert not os.path.exists(os.path.join(output, ".claude-plugin"))
+
+    def test_creates_skill_md(self, tmp_path):
+        output = str(tmp_path / "test-openclaw")
+        generate_openclaw("https://example.com/mcp", None, output)
+
+        skill_path = os.path.join(output, "skills", "knowledge-graph", "SKILL.md")
+        assert os.path.isfile(skill_path)
+
+    def test_creates_readme(self, tmp_path):
+        output = str(tmp_path / "test-openclaw")
+        generate_openclaw("https://example.com/mcp", None, output)
+
+        assert os.path.isfile(os.path.join(output, "README.md"))
+
+    def test_url_appears_in_config(self, tmp_path):
+        output = str(tmp_path / "test-openclaw")
+        generate_openclaw("https://my-server.railway.app/mcp", None, output)
+
+        with open(os.path.join(output, "openclaw.json.example")) as f:
+            data = json.load(f)
+
+        server = data["plugins"]["entries"]["mcp-adapter"]["config"]["servers"][0]
+        assert server["url"] == "https://my-server.railway.app/mcp"
+
+    def test_placeholder_token(self, tmp_path):
+        output = str(tmp_path / "test-openclaw")
+        generate_openclaw("https://example.com/mcp", None, output)
+
+        with open(os.path.join(output, "openclaw.json.example")) as f:
+            data = json.load(f)
+
+        server = data["plugins"]["entries"]["mcp-adapter"]["config"]["servers"][0]
+        assert server["headers"]["Authorization"] == "Bearer ${KG_QUERY_TOKEN}"
+
+    def test_baked_token(self, tmp_path):
+        output = str(tmp_path / "test-openclaw")
+        generate_openclaw("https://example.com/mcp", "my-secret", output)
+
+        with open(os.path.join(output, "openclaw.json.example")) as f:
+            data = json.load(f)
+
+        server = data["plugins"]["entries"]["mcp-adapter"]["config"]["servers"][0]
+        assert server["headers"]["Authorization"] == "Bearer my-secret"
+
+    def test_skill_md_content_matches_source(self, tmp_path):
+        output = str(tmp_path / "test-openclaw")
+        generate_openclaw("https://example.com/mcp", None, output)
+
+        skill_path = os.path.join(output, "skills", "knowledge-graph", "SKILL.md")
+        with open(skill_path) as f:
+            generated = f.read()
+
+        with open(find_skill_md()) as f:
+            source = f.read()
+
+        assert generated == source
+
+    def test_overwrite_existing_output(self, tmp_path):
+        output = str(tmp_path / "test-openclaw")
+
+        generate_openclaw("https://first.com/mcp", None, output)
+        generate_openclaw("https://second.com/mcp", "token2", output)
+
+        with open(os.path.join(output, "openclaw.json.example")) as f:
+            data = json.load(f)
+
+        server = data["plugins"]["entries"]["mcp-adapter"]["config"]["servers"][0]
+        assert server["url"] == "https://second.com/mcp"
+
+    def test_returns_output_path(self, tmp_path):
+        output = str(tmp_path / "test-openclaw")
+        result = generate_openclaw("https://example.com/mcp", None, output)
+        assert result == output
+
+
+class TestGenerateAll:
+    """Tests for --platform all (both Cowork and OpenClaw)."""
+
+    def test_creates_both_subdirectories(self, tmp_path):
+        cowork_output = str(tmp_path / "all" / "cowork")
+        openclaw_output = str(tmp_path / "all" / "openclaw")
+
+        generate("https://example.com/mcp", None, cowork_output)
+        generate_openclaw("https://example.com/mcp", None, openclaw_output)
+
+        assert os.path.isdir(cowork_output)
+        assert os.path.isdir(openclaw_output)
+
+    def test_cowork_subdir_has_plugin_structure(self, tmp_path):
+        cowork_output = str(tmp_path / "all" / "cowork")
+
+        generate("https://example.com/mcp", None, cowork_output)
+
+        assert os.path.isdir(os.path.join(cowork_output, ".claude-plugin"))
+        assert os.path.isfile(os.path.join(cowork_output, ".mcp.json"))
+
+    def test_openclaw_subdir_has_openclaw_structure(self, tmp_path):
+        openclaw_output = str(tmp_path / "all" / "openclaw")
+
+        generate_openclaw("https://example.com/mcp", None, openclaw_output)
+
+        assert os.path.isfile(os.path.join(openclaw_output, "openclaw.json.example"))
+        assert os.path.isfile(os.path.join(openclaw_output, "README.md"))
+        assert not os.path.exists(os.path.join(openclaw_output, ".claude-plugin"))
