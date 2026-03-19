@@ -38,7 +38,9 @@
       "Bash(python:*)",
       "Bash(find:*)",
       "Bash(ls:*)",
-      "Bash(git:*)"
+      "Bash(git:*)",
+      "WebFetch(domain:docs.railway.com)",
+      "WebFetch(domain:docs.openclaw.com)"
     ]
   },
   "enabledMcpjsonServers": [

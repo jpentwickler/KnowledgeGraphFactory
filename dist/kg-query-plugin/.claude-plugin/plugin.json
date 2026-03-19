@@ -1,0 +1,13 @@
+{
+  "name": "kg-query",
+  "version": "1.0.0",
+  "description": "Query knowledge graphs built with KG-Factory",
+  "author": {
+    "name": "KG-Factory"
+  },
+  "keywords": [
+    "knowledge-graph",
+    "neo4j",
+    "query"
+  ]
+}
