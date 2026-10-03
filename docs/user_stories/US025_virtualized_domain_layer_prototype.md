@@ -22,7 +22,7 @@ compared with selective materialization
 The risk is in Neo4j Virtual Graph (public preview, Enterprise-only when self-managed) and in
 Ontop against DuckDB, neither of which the repo has used.
 
-## Status: built, awaiting review — all 7 steps built and unit-tested (36 tests) in the cloud; the runs that need Docker, Neo4j Enterprise and OpenAI (spike, native build, CQ5, composite, Ontop) are for the owner's machine
+## Status: built, awaiting review — all 7 steps built and unit-tested (37 tests) in the cloud, and the second review round (uv via `py.sh`, raw-question embedding in hop 1) is fixed in 36c53f1; the runs that need Docker, Neo4j Enterprise and OpenAI (spike, native build, CQ5, composite, Ontop) are for the owner's machine
 
 ## Context
 
