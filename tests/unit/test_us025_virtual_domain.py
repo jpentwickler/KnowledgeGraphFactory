@@ -206,3 +206,89 @@ class TestNativeGraphChecks:
         from prototypes.us025_virtual_domain.load_native import check_native_graph
 
         assert not check_native_graph(self._driver(indexes, non_text, corresponds_to))["ok"]
+
+
+# ---------------------------------------------------------------------------
+# Key stamping (step 3)
+# ---------------------------------------------------------------------------
+
+
+def _doc(product):
+    return {"title": f"{product} Reviews", "path": f"/data/reviews/{product.lower()}.md"}
+
+
+class TestProductForDocument:
+    def test_title_minus_suffix(self):
+        from prototypes.us025_virtual_domain.stamp_keys import product_for_document
+
+        assert product_for_document(_doc("Helsingborg Dresser")) == "Helsingborg Dresser"
+
+    def test_falls_back_to_file_heading(self):
+        from prototypes.us025_virtual_domain.stamp_keys import product_for_document
+
+        path = duckdb_domain.DEFAULT_DATA_DIR / "reviews" / "jonkoping_coffee_table_reviews.md"
+        assert product_for_document({"title": None, "path": str(path)}) == "Jönköping Coffee Table"
+
+    def test_every_review_document_names_one_product(self, con):
+        """All 10 review titles map to exactly one product in products.csv."""
+        from prototypes.us025_virtual_domain.stamp_keys import product_for_document
+
+        names = {r[0] for r in con.execute("SELECT product_name FROM products").fetchall()}
+        reviews = sorted((duckdb_domain.DEFAULT_DATA_DIR / "reviews").glob("*.md"))
+        assert len(reviews) == 10
+        for path in reviews:
+            assert product_for_document({"title": None, "path": str(path)}) in names, path.name
+
+
+class TestResolve:
+    def test_helsingborg_drawer_rails_is_s1085(self, con):
+        """The product narrows "drawer rails" to S-1085, not S-1078 (Malmö Desk)."""
+        from prototypes.us025_virtual_domain.stamp_keys import part_ids_for, resolve
+
+        assert part_ids_for(con, "Malmö Desk", "Drawer Rails") == ["S-1078"]
+        [result] = resolve(con, [{"id": "e1", "name": "drawer rails",
+                                  "documents": [_doc("Helsingborg Dresser")]}])
+        assert (result["status"], result["part_id"]) == ("stamped", "S-1085")
+
+    def test_part_from_two_products_is_ambiguous(self, con):
+        from prototypes.us025_virtual_domain.stamp_keys import resolve
+
+        [result] = resolve(con, [{"id": "e1", "name": "drawer rails",
+                                  "documents": [_doc("Helsingborg Dresser"), _doc("Malmö Desk")]}])
+        assert result["status"] == "ambiguous"
+        assert result["part_id"] is None
+        assert result["products"] == ["Helsingborg Dresser", "Malmö Desk"]
+
+    def test_unknown_part_name_is_unmatched(self, con):
+        from prototypes.us025_virtual_domain.stamp_keys import resolve
+
+        [result] = resolve(con, [{"id": "e1", "name": "flux capacitor",
+                                  "documents": [_doc("Helsingborg Dresser")]}])
+        assert (result["status"], result["part_id"]) == ("unmatched", None)
+
+    def test_no_name_similarity_fallback(self, con):
+        """A near-miss name is unmatched, not fuzzy-matched."""
+        from prototypes.us025_virtual_domain.stamp_keys import resolve
+
+        [result] = resolve(con, [{"id": "e1", "name": "drawer rail",
+                                  "documents": [_doc("Helsingborg Dresser")]}])
+        assert result["status"] == "unmatched"
+
+    def test_stamp_writes_only_resolved_keys(self, con):
+        from unittest.mock import MagicMock
+
+        from prototypes.us025_virtual_domain.stamp_keys import STAMP, UNSTAMP, stamp
+
+        session = MagicMock()
+        session.run.side_effect = lambda q, **p: (
+            [{"id": "e1", "name": "drawer rails", "documents": [_doc("Helsingborg Dresser")]},
+             {"id": "e2", "name": "flux capacitor", "documents": [_doc("Helsingborg Dresser")]}]
+            if not p else None
+        )
+        driver = MagicMock()
+        driver.session.return_value.__enter__.return_value = session
+
+        stamp(driver, con)
+        calls = {c.args[0]: c.kwargs for c in session.run.call_args_list[1:]}
+        assert calls[STAMP] == {"rows": [{"id": "e1", "part_id": "S-1085"}]}
+        assert calls[UNSTAMP] == {"ids": ["e2"]}
