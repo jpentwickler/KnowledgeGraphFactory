@@ -6,6 +6,8 @@
 **I want** a User Intent Agent that captures knowledge graph requirements through conversation
 **So that** downstream agents have a clear, approved goal to work from
 
+## Status: DONE — built in 851fd25; closed by the owner on 2026-10-03, before the stage-word workflow (acceptance boxes were never ticked)
+
 ## Story Points: 3
 
 ## Acceptance Criteria

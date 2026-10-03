@@ -158,13 +158,9 @@ kg-factory/
 │   ├── test_05_facts.py
 │   └── test_06_build.py
 │
-├── docs/                  # Detailed agent specs
-│   ├── 01_user_intent.md
-│   ├── 02_file_suggestion.md
-│   ├── 03_schema_proposal.md
-│   ├── 04_ner_extraction.md
-│   ├── 05_fact_extraction.md
-│   └── 06_graph_builder.md
+├── docs/
+│   ├── architecture/      # Agent specs and architecture: 00_architecture.md, 01_user_intent.md … 15_*.md
+│   └── user_stories/      # USNNN_*.md stories + README.md (template, stage words, Story Index)
 │
 ├── mcp_server/            # MCP server exposing agents as tools
 │   └── server.py
@@ -304,11 +300,9 @@ MATCH (n) DETACH DELETE n
 
 ## Next Steps for Claude Code
 
-1. Start by implementing `core/agent.py` - the base agent runner
-2. Then `core/tools.py` - tool execution utilities  
-3. Then `agents/user_intent.py` - first agent
-4. Then `tests/test_01_user_intent.py` - interactive test
-5. Run the test, iterate until working
-6. Move to next agent
+The original build order (core framework → one agent per stage) is complete: US001–US024 are
+`DONE` except US016 (see the Story Index in `docs/user_stories/README.md`). New work starts from a
+story, as the **Workflow** section above describes.
 
-Read the detailed spec in `docs/01_user_intent.md` before implementing each agent.
+Agent specs live in `docs/architecture/` (`00_architecture.md`, `01_user_intent.md` …
+`15_adaptive_retrieval_architecture.md`). Read the one for an agent before changing it.

@@ -8,7 +8,7 @@
 
 ## Story Points: 2
 
-## Status: Not Started
+## Status: TODO — not started; no `_use_case` code exists yet
 
 ## Context
 

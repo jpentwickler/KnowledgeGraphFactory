@@ -6,6 +6,8 @@
 **I want** a File Suggestion Agent that identifies relevant data files for knowledge graph construction
 **So that** downstream agents know which structured and unstructured files to process
 
+## Status: DONE — built in 96d98d5; closed by the owner on 2026-10-03, before the stage-word workflow (acceptance boxes were never ticked)
+
 ## Story Points: 5
 
 ## Acceptance Criteria

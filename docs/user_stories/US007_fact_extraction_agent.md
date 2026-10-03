@@ -6,6 +6,8 @@
 **I want** a Fact Extraction Agent that proposes fact types (subject-predicate-object triples) based on approved entity types
 **So that** downstream agents know how to extract relationships from unstructured text
 
+## Status: DONE — built in 3b1954a; closed by the owner on 2026-10-03, before the stage-word workflow (acceptance boxes were never ticked)
+
 ## Story Points: 5
 
 ## Acceptance Criteria

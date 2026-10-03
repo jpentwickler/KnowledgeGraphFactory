@@ -6,6 +6,8 @@
 **I want** a Schema Proposal Agent that uses a multi-agent critic pattern to design a knowledge graph schema
 **So that** downstream agents have an approved construction plan for building nodes and relationships
 
+## Status: DONE — built in c581cb9 (refactored in 4e9899d); closed by the owner on 2026-10-03, before the stage-word workflow (acceptance boxes were never ticked)
+
 ## Story Points: 8
 
 ## Acceptance Criteria
