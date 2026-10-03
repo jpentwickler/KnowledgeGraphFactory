@@ -124,3 +124,85 @@ class TestVirtualGraphSchema:
         rel = next(r for r in schema["entities"]["relationships"] if r["label"] == "SUPPLIED_BY")
         assert (rel["start"]["targetEntity"], rel["end"]["targetEntity"]) == ("Part", "Supplier")
         assert {"unit_cost", "lead_time_days"} <= {p["name"] for p in rel["properties"]}
+
+
+# ---------------------------------------------------------------------------
+# State copy and native build (step 2)
+# ---------------------------------------------------------------------------
+
+
+class TestPrepareState:
+    def test_copy_leaves_all_review_files_pending(self, tmp_path):
+        """The tracked state has every file processed; the copy has all 10 pending."""
+        from pipelines.text_builder import _resolve_files_to_process
+        from prototypes.us025_virtual_domain.prepare_state import SOURCE_STATE, prepare
+
+        source = json.loads(SOURCE_STATE.read_text())
+        assert _resolve_files_to_process(source, "all") == []  # why the copy is needed
+
+        copy = json.loads(prepare(SOURCE_STATE, tmp_path).read_text())
+        pending = _resolve_files_to_process(copy, "all")
+        assert len(pending) == 10
+        assert "reviews/helsingborg_dresser_reviews.md" in pending
+
+    def test_copy_keeps_only_build_inputs(self, tmp_path):
+        from prototypes.us025_virtual_domain.prepare_state import KEEP_KEYS, SOURCE_STATE, prepare
+
+        copy = json.loads(prepare(SOURCE_STATE, tmp_path).read_text())
+        assert tuple(copy) == KEEP_KEYS
+        for dropped in ("text_graph_progress", "proposed_resolution_candidates",
+                        "approved_resolution_candidates", "domain_node_schema"):
+            assert dropped not in copy
+
+    def test_shared_state_untouched(self, tmp_path):
+        from prototypes.us025_virtual_domain.prepare_state import SOURCE_STATE, prepare
+
+        before = SOURCE_STATE.read_bytes()
+        prepare(SOURCE_STATE, tmp_path)
+        assert SOURCE_STATE.read_bytes() == before
+
+    def test_missing_inputs_rejected(self):
+        from prototypes.us025_virtual_domain.prepare_state import filtered_state
+
+        with pytest.raises(KeyError):
+            filtered_state({"approved_files": {}})
+
+
+class TestNativeGraphChecks:
+    @staticmethod
+    def _driver(indexes, non_text, corresponds_to):
+        from unittest.mock import MagicMock
+
+        def run(query, **params):
+            result = MagicMock()
+            if "SHOW INDEXES" in query:
+                result.__iter__.return_value = [{"name": n, "state": s} for n, s in indexes.items()]
+            elif "NOT n:__Entity__" in query:
+                result.__iter__.return_value = non_text
+            elif "CORRESPONDS_TO" in query:
+                result.single.return_value = {"c": corresponds_to}
+            else:
+                result.__iter__.return_value = [{"label": "Chunk", "count": 40}]
+            return result
+
+        driver = MagicMock()
+        driver.session.return_value.__enter__.return_value.run.side_effect = run
+        return driver
+
+    def test_clean_text_graph_passes(self):
+        from prototypes.us025_virtual_domain.load_native import check_native_graph
+
+        driver = self._driver({"chunk-embeddings": "ONLINE", "chunk-fulltext": "ONLINE"}, [], 0)
+        assert check_native_graph(driver)["ok"]
+
+    @pytest.mark.parametrize("indexes, non_text, corresponds_to", [
+        ({"chunk-embeddings": "ONLINE"}, [], 0),                                     # fulltext missing
+        ({"chunk-embeddings": "POPULATING", "chunk-fulltext": "ONLINE"}, [], 0),     # not online yet
+        ({"chunk-embeddings": "ONLINE", "chunk-fulltext": "ONLINE"},
+         [{"labels": ["Supplier"], "count": 20}], 0),                                # domain nodes
+        ({"chunk-embeddings": "ONLINE", "chunk-fulltext": "ONLINE"}, [], 12),        # resolution ran
+    ])
+    def test_violations_fail(self, indexes, non_text, corresponds_to):
+        from prototypes.us025_virtual_domain.load_native import check_native_graph
+
+        assert not check_native_graph(self._driver(indexes, non_text, corresponds_to))["ok"]
