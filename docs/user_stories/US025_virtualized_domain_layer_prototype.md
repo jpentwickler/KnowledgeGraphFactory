@@ -184,6 +184,7 @@ On the owner's machine, from the repo root, with the env vars in
 | Engine order | Virtual Graph spike → CQ5 with Virtual Graph → Python/DuckDB baseline → Ontop, optional (review) |
 | CQ5 shape | Two Cypher queries joined in app code; single-statement composite is an attempt only (review) |
 | Product for a part | From its source document: `Part:__Entity__ <-[:FROM_CHUNK]- Chunk -[:FROM_DOCUMENT]-> Document`, title minus ` Reviews`. Always present, unlike the LLM-extracted `belongs_to` edge (review, chosen by worker) |
+| Starting point | The old Neo4j database has been deleted; the native side is built from scratch, from an empty database, with the existing tools (owner, review on PR #1) |
 | Native build | Through `_build_unstructured` in `mcp_server/server.py` (creates both text indexes), on a filtered copy of `state/current_state.json` (review) |
 
 ### Build order
