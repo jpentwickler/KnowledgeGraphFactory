@@ -8,7 +8,7 @@
 
 ## Story Points: 13
 
-## Status: Not Started
+## Status: DONE — built in e099a89; closed by the owner on 2026-10-03, before the stage-word workflow (acceptance boxes were never ticked)
 
 ## Acceptance Criteria
 

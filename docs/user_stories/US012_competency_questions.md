@@ -6,6 +6,8 @@
 **I want** to define, review, and manage competency questions as part of the knowledge graph design
 **So that** the graph has clear, testable requirements that scope its design, guide downstream agents, and serve as the basis for later evaluation
 
+## Status: DONE — built in 4bc9ab8; closed by the owner on 2026-10-03, before the stage-word workflow (acceptance boxes were never ticked)
+
 ## Story Points: 5
 
 ## Background

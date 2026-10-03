@@ -6,6 +6,8 @@
 **I want** a core framework for running agents with tool execution and state management
 **So that** I can build consistent agents that follow the propose-approve pattern
 
+## Status: DONE — built in 851fd25; closed by the owner on 2026-10-03, before the stage-word workflow (acceptance boxes were never ticked)
+
 ## Story Points: 5
 
 ## Acceptance Criteria

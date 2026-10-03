@@ -8,7 +8,7 @@
 
 ## Story Points: 5
 
-## Status: Not Started
+## Status: DONE — built in a2ecad6; closed by the owner on 2026-10-03, before the stage-word workflow (acceptance boxes were never ticked)
 
 ## Context
 

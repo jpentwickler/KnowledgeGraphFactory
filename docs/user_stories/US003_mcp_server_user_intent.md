@@ -6,6 +6,8 @@
 **I want** to interact with the User Intent Agent through Claude Code via MCP
 **So that** I can define my knowledge graph goals through natural conversation in my familiar development environment
 
+## Status: DONE — built in 851fd25; closed by the owner on 2026-10-03, before the stage-word workflow (acceptance boxes were never ticked)
+
 ## Story Points: 5
 
 ## Acceptance Criteria

@@ -11,6 +11,20 @@ KG-Factory provides tools (not a framework) that integrate with Claude Code, ena
 Build a multi-agent system that automates knowledge graph construction in Neo4j.
 Uses pure Python + Claude API (Anthropic SDK). No frameworks like LangChain or Google ADK.
 
+## Workflow
+
+Voice saves story drafts, cloud **workers** build one story each on its own branch and PR, and
+the **hub** (Claude Code on the owner's machine, where `CLAUDE_CODE_REMOTE` is unset) reviews
+through PR review comments, merges, runs the Neo4j/Docker checks and closes. The roles, stages and
+phrases are in `WORKFLOW.md` in `jpentwickler/claude-skills`, not here. What the shared skills read
+from this project:
+
+| | |
+|---|---|
+| Stories | `docs/user_stories/USNNN_*.md` (from US025 on, branch `us-0nn-short-slug`, PR `US-0NN: <title>`). The `## Status:` line starts with a stage word (`docs/user_stories/README.md`) |
+| Health command | `uv run --no-project --python 3.13 --with-requirements requirements.txt python -m pytest tests/unit -q` (no Neo4j or API keys needed). The repo has no `pyproject.toml`, so Python always runs through `uv` like this |
+| Vault | Yes. The vault project is **Ontology Pipeline** (`repo: KnowledgeGraphFactory`). Drafts are notes tagged `story-draft` with `project: '[[KnowledgeGraphFactory]]'`, under `projects/Ontology Pipeline/drafts/`, found with `search_notes("story-draft")` |
+
 ## Integration Approach
 
 **Decision**: Hybrid MCP + CLAUDE.md
@@ -144,13 +158,9 @@ kg-factory/
 │   ├── test_05_facts.py
 │   └── test_06_build.py
 │
-├── docs/                  # Detailed agent specs
-│   ├── 01_user_intent.md
-│   ├── 02_file_suggestion.md
-│   ├── 03_schema_proposal.md
-│   ├── 04_ner_extraction.md
-│   ├── 05_fact_extraction.md
-│   └── 06_graph_builder.md
+├── docs/
+│   ├── architecture/      # Agent specs and architecture: 00_architecture.md, 01_user_intent.md … 15_*.md
+│   └── user_stories/      # USNNN_*.md stories + README.md (template, stage words, Story Index)
 │
 ├── mcp_server/            # MCP server exposing agents as tools
 │   └── server.py
@@ -293,11 +303,9 @@ MATCH (n) DETACH DELETE n
 
 ## Next Steps for Claude Code
 
-1. Start by implementing `core/agent.py` - the base agent runner
-2. Then `core/tools.py` - tool execution utilities  
-3. Then `agents/user_intent.py` - first agent
-4. Then `tests/test_01_user_intent.py` - interactive test
-5. Run the test, iterate until working
-6. Move to next agent
+The original build order (core framework → one agent per stage) is complete: US001–US024 are
+`DONE` except US016 (see the Story Index in `docs/user_stories/README.md`). New work starts from a
+story, as the **Workflow** section above describes.
 
-Read the detailed spec in `docs/01_user_intent.md` before implementing each agent.
+Agent specs live in `docs/architecture/` (`00_architecture.md`, `01_user_intent.md` …
+`15_adaptive_retrieval_architecture.md`). Read the one for an agent before changing it.

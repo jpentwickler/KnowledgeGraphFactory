@@ -1,5 +1,7 @@
 # ✅ US008 Implementation Complete: Domain Graph Builder
 
+## Status: DONE — built in 8fa10f6; closed by the owner on 2026-10-03, before the stage-word workflow (acceptance boxes were never ticked)
+
 ## Summary
 
 Successfully implemented the Domain Graph Builder (Stage 6, Component 1) - a deterministic pipeline that imports structured CSV data into Neo4j according to an approved construction plan.

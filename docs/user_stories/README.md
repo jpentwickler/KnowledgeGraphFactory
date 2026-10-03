@@ -27,6 +27,17 @@
 | 8 | 1-2 weeks | Complex, some unknowns |
 | 13 | 2+ weeks | Should probably split |
 
+## Status line
+
+The `## Status:` line is the source of truth for a story's state. It starts with one stage word,
+then `—` and free text (see `WORKFLOW.md` in `jpentwickler/claude-skills`):
+
+`TODO` or `drafted` → `picked up` → `planned` → `built, awaiting review` → `changes requested` →
+`approved` → `merged` → `verified on the mini` → `DONE`
+
+A worker writes the stages up to `built, awaiting review`; the hub writes the rest. Stories
+closed before this convention keep a plain `DONE`.
+
 ## User Story Template
 
 ```markdown
@@ -37,6 +48,8 @@
 **As a** [persona]
 **I want** [capability]
 **So that** [benefit]
+
+## Status: TODO — [free text]
 
 ## Story Points: [N]
 
@@ -88,26 +101,28 @@ All user stories must meet these criteria before being considered complete:
 
 | ID | Title | Points | Status |
 |----|-------|--------|--------|
-| [US001](US001_core_agent_framework.md) | Core Agent Framework | 5 | Not Started |
-| [US002](US002_user_intent_agent.md) | User Intent Agent | 3 | Not Started |
-| [US003](US003_mcp_server_user_intent.md) | MCP Server with User Intent | 5 | Not Started |
-| [US004](US004_file_suggestion_agent.md) | File Suggestion Agent | 3 | Not Started |
-| [US005](US005_schema_proposal_agent.md) | Schema Proposal Agent | 5 | Not Started |
-| [US006](US006_ner_extraction_agent.md) | NER Extraction Agent | 3 | Not Started |
-| [US007](US007_fact_extraction_agent.md) | Fact Extraction Agent | 3 | Not Started |
-| [US008](US008_graph_builder.md) | Domain Graph Builder | 5 | Not Started |
-| [US009](US009_text_graph_builder.md) | Text Graph Builder | 8 | Not Started |
-| [US010](US010_adaptive_markdown_splitting.md) | Adaptive Markdown Splitting | 3 | Not Started |
-| [US011](US011_langsmith_observability.md) | LangSmith Observability | 3 | Not Started |
-| [US012](US012_competency_questions.md) | Competency Questions | 3 | Not Started |
-| [US013](US013_kg_query.md) | KG Query Infrastructure | 5 | Not Started |
-| [US014](US014_cq_evaluation.md) | CQ Evaluation | 5 | Not Started |
-| [US015](US015_query_agent_openclaw.md) | Query Agent & Platform Integration | 13 | Not Started |
-| [US017](US017_mermaid_diagram.md) | Mermaid Diagram Generation | 3 | Not Started |
-| [US018](US018_project_management.md) | Project Management | 5 | Not Started |
-| [US020](US020_extraction_efficiency.md) | Extraction Efficiency | 5 | Not Started |
-| [US021](US021_remote_query_server.md) | Remote Query Server | 5 | Not Started |
-| [US022](US022_plugin_distribution.md) | Plug-and-Play Plugin Distribution | 3 | Not Started |
-| [US023](US023_canonical_graph_schema.md) | Canonical Graph Schema | 3 | Not Started |
-| [US024](US024_openclaw_integration.md) | OpenClaw Cloud Integration | 3 | Not Started |
+| [US001](US001_core_agent_framework.md) | Core Agent Framework | 5 | DONE |
+| [US002](US002_user_intent_agent.md) | User Intent Agent | 3 | DONE |
+| [US003](US003_mcp_server_user_intent.md) | MCP Server with User Intent | 5 | DONE |
+| [US004](US004_file_suggestion_agent.md) | File Suggestion Agent | 5 | DONE |
+| [US005](US005_schema_proposal_agent.md) | Schema Proposal Agent | 8 | DONE |
+| [US006](US006_ner_extraction_agent.md) | NER Extraction Agent | 5 | DONE |
+| [US007](US007_fact_extraction_agent.md) | Fact Extraction Agent | 5 | DONE |
+| [US008](US008_graph_builder.md) | Domain Graph Builder | — | DONE |
+| [US009](US009_text_graph_builder.md) | Text Graph Builder | 8 | DONE |
+| [US010](US010_adaptive_markdown_splitting.md) | Adaptive Markdown Splitting | 3 | DONE |
+| [US011](US011_langsmith_observability.md) | LangSmith Observability | 3 | DONE |
+| [US012](US012_competency_questions.md) | Competency Questions | 5 | DONE |
+| [US013](US013_kg_query.md) | KG Query Infrastructure | 8 | DONE |
+| [US014](US014_cq_evaluation.md) | CQ Evaluation | 5 | DONE |
+| [US015](US015_query_agent_openclaw.md) | Query Agent & Platform Integration | 13 | DONE |
+| [US016](US016_use_case_provenance.md) | Use Case Provenance | 2 | TODO |
+| [US017](US017_mermaid_diagram.md) | Mermaid Diagram Generation | 5 | DONE |
+| [US018](US018_project_management.md) | Project Management | 5 | DONE |
+| US019 | Async background execution for MCP tools | — | DONE (no story file; built in fc75d5e) |
+| [US020](US020_extraction_efficiency.md) | Extraction Efficiency | 5 | DONE |
+| [US021](US021_remote_query_server.md) | Remote Query Server | 5 | DONE |
+| [US022](US022_plugin_distribution.md) | Plug-and-Play Plugin Distribution | 3 | DONE |
+| [US023](US023_canonical_graph_schema.md) | Canonical Graph Schema | 8 | DONE |
+| [US024](US024_openclaw_integration.md) | OpenClaw Cloud Integration | 3 | DONE |
 | [US025](US025_virtualized_domain_layer_prototype.md) | Virtualized Domain Layer Prototype | 5 | built, awaiting review |

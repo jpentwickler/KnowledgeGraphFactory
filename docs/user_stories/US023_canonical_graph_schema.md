@@ -8,7 +8,7 @@
 
 ## Story Points: 8
 
-## Status: Not Started
+## Status: DONE — built in d2a5f41; closed by the owner on 2026-10-03, before the stage-word workflow (acceptance boxes were never ticked)
 
 ## Context
 
