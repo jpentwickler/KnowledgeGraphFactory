@@ -371,3 +371,42 @@ class TestVirtualGraphBackend:
     def test_composite_attempt_uses_both_aliases(self):
         text = (PROTOTYPE_DIR / "cq5_composite.cypher").read_text()
         assert "USE us025.native" in text and "USE us025.domain" in text
+
+
+# ---------------------------------------------------------------------------
+# Python/DuckDB baseline hop 2 (step 5)
+# ---------------------------------------------------------------------------
+
+
+class TestDuckdbBaseline:
+    def test_cq5_answer_from_the_csv(self):
+        """Stubbed hop 1 + real DuckDB hop 2 gives the two suppliers with prices."""
+        from prototypes.us025_virtual_domain.cq5 import duckdb_backend, join_cq5
+
+        fetch, rollup, close = duckdb_backend()
+        try:
+            result = join_cq5(HELSINGBORG_HITS, fetch)
+            roll = rollup()
+        finally:
+            close()
+        assert [(s["supplier_name"], s["unit_cost"], s["lead_time_days"]) for s in result["suppliers"]] == [
+            ("Korean Metal Works", 47.14, 17),
+            ("Shanghai Metal Corp", 40.82, 26),
+        ]
+        assert sum(r["parts"] for r in roll) == 176
+
+    def test_live_price_through_the_join(self, data_dir, monkeypatch):
+        """Editing the CSV changes the CQ5 answer with no rebuild step in between."""
+        from prototypes.us025_virtual_domain import cq5
+
+        monkeypatch.setattr(duckdb_domain, "DEFAULT_DATA_DIR", data_dir)
+        monkeypatch.setattr(duckdb_domain.connect, "__defaults__", (data_dir, None))
+        fetch, _, close = cq5.duckdb_backend()
+        try:
+            before = {s["supplier_name"]: s["unit_cost"] for s in cq5.join_cq5(HELSINGBORG_HITS, fetch)["suppliers"]}
+            csv = data_dir / "part_supplier_mapping.csv"
+            csv.write_text(csv.read_text().replace(",$47.14,", ",$12.34,"))
+            after = {s["supplier_name"]: s["unit_cost"] for s in cq5.join_cq5(HELSINGBORG_HITS, fetch)["suppliers"]}
+        finally:
+            close()
+        assert (before["Korean Metal Works"], after["Korean Metal Works"]) == (47.14, 12.34)
