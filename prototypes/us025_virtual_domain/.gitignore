@@ -3,3 +3,4 @@ furniture.duckdb
 furniture.duckdb.wal
 state/
 jdbc/
+furniture_ontop.duckdb

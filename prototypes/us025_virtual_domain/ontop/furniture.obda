@@ -1,0 +1,24 @@
+[PrefixDeclaration]
+:		http://example.org/us025/furniture#
+
+[MappingDeclaration] @collection [[
+mappingId	product
+target		:product/{product_id} a :Product ; :productId {product_id} ; :name {product_name} ; :price {price} .
+source		SELECT product_id, product_name, price FROM products
+
+mappingId	assembly
+target		:assembly/{assembly_id} a :Assembly ; :assemblyId {assembly_id} ; :name {assembly_name} . :product/{product_id} :hasAssembly :assembly/{assembly_id} .
+source		SELECT assembly_id, assembly_name, product_id FROM assemblies
+
+mappingId	part
+target		:part/{part_id} a :Part ; :partId {part_id} ; :name {part_name} . :assembly/{assembly_id} :hasPart :part/{part_id} .
+source		SELECT part_id, part_name, assembly_id FROM parts
+
+mappingId	supplier
+target		:supplier/{supplier_id} a :Supplier ; :supplierId {supplier_id} ; :name {name} ; :country {country} .
+source		SELECT supplier_id, name, country FROM suppliers
+
+mappingId	supply
+target		:part/{part_id} :suppliedBy :supplier/{supplier_id} . :supply/{part_id}/{supplier_id} a :Supply ; :ofPart :part/{part_id} ; :bySupplier :supplier/{supplier_id} ; :unitCost {unit_cost} ; :leadTimeDays {lead_time_days} .
+source		SELECT part_id, supplier_id, unit_cost, lead_time_days FROM part_supplier_mapping
+]]

@@ -410,3 +410,77 @@ class TestDuckdbBaseline:
         finally:
             close()
         assert (before["Korean Metal Works"], after["Korean Metal Works"]) == (47.14, 12.34)
+
+
+# ---------------------------------------------------------------------------
+# Ontop mapping and SPARQL (step 6, optional comparison)
+# ---------------------------------------------------------------------------
+
+
+def _materialize_obda(con, obda_text):
+    """Tiny stand-in for Ontop: run each mapping's SQL in DuckDB, fill the target
+    template, and load the triples into rdflib. Checks the mapping and the SPARQL,
+    not Ontop's SQL generation (that runs on the owner's machine via run_ontop.sh)."""
+    import re
+    from urllib.parse import quote
+
+    import rdflib
+
+    prefix = re.search(r"^:\s+(\S+)$", obda_text, re.MULTILINE).group(1)
+    mappings = re.findall(r"^target\t+(.+)\n^source\t+(.+)$", obda_text, re.MULTILINE)
+    assert mappings, "no mappings parsed"
+
+    def literal(value):
+        if isinstance(value, bool) or value is None:
+            raise AssertionError(f"unexpected value {value!r}")
+        if isinstance(value, (int, float)):
+            return repr(value) if isinstance(value, float) else str(value)
+        return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+    turtle = [f"@prefix : <{prefix}> ."]
+    for target, source in mappings:
+        cursor = con.execute(source)
+        columns = [d[0] for d in cursor.description]
+        for row in cursor.fetchall():
+            values = dict(zip(columns, row))
+            tokens = []
+            for token in target.split():
+                names = re.findall(r"\{(\w+)\}", token)
+                for name in names:
+                    assert name in values, f"{name} not selected by: {source}"
+                if token.startswith(":"):
+                    # Turtle prefixed names cannot hold "/", so write full IRIs
+                    local = re.sub(r"\{(\w+)\}", lambda m: quote(str(values[m.group(1)])), token[1:])
+                    token = f"<{prefix}{local}>"
+                elif names:
+                    token = literal(values[names[0]])
+                tokens.append(token)
+            turtle.append(" ".join(tokens))
+    graph = rdflib.Graph()
+    graph.parse(data="\n".join(turtle), format="turtle")
+    return graph
+
+
+class TestOntopMapping:
+    @pytest.fixture
+    def graph(self, con):
+        pytest.importorskip("rdflib")
+        return _materialize_obda(con, (PROTOTYPE_DIR / "ontop" / "furniture.obda").read_text())
+
+    def test_hop2_sparql_returns_s1085_suppliers(self, graph):
+        rows = graph.query((PROTOTYPE_DIR / "ontop" / "hop2_suppliers.rq").read_text())
+        assert [(str(r.supplierName), float(r.unitCost), int(r.leadTimeDays)) for r in rows] == [
+            ("Korean Metal Works", 47.14, 17),
+            ("Shanghai Metal Corp", 40.82, 26),
+        ]
+
+    def test_rollup_sparql_matches_duckdb(self, graph, con):
+        rows = graph.query((PROTOTYPE_DIR / "ontop" / "parts_per_supplier.rq").read_text())
+        sparql = {str(r.supplierName): int(r.parts) for r in rows}
+        sql = {r["supplier_name"]: r["parts"] for r in duckdb_domain.parts_per_supplier(con)}
+        assert sparql == sql
+
+    def test_properties_point_at_the_private_views_file(self):
+        props = (PROTOTYPE_DIR / "ontop" / "furniture.properties").read_text()
+        assert "jdbc:duckdb:/duckdb-data/furniture_ontop.duckdb" in props
+        assert "org.duckdb.DuckDBDriver" in props
