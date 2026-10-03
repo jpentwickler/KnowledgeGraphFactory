@@ -15,7 +15,7 @@ DUCKDB_JDBC_VERSION="${DUCKDB_JDBC_VERSION:-1.5.3.0}"
 ONTOP_IMAGE="${ONTOP_IMAGE:-ontop/ontop}"
 
 echo "== Private views file for Ontop (avoids DuckDB's single-writer lock with Virtual Graph)"
-(cd "$REPO" && python -m prototypes.us025_virtual_domain.build_duckdb \
+("$HERE/py.sh" -m prototypes.us025_virtual_domain.build_duckdb \
    --data-dir "$FURNITURE_DATA_DIR" --db-path "$HERE/furniture_ontop.duckdb")
 
 mkdir -p jdbc

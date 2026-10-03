@@ -12,9 +12,9 @@ spans both is attempted separately (``cq5_composite.cypher``), because Neo4j doe
 not support native + virtual federation in one statement yet.
 
 Usage (from the repo root):
-    python -m prototypes.us025_virtual_domain.cq5 --via virtual-graph
-    python -m prototypes.us025_virtual_domain.cq5 --via duckdb
-    python -m prototypes.us025_virtual_domain.cq5 --via duckdb --question "..." --json
+    prototypes/us025_virtual_domain/py.sh -m prototypes.us025_virtual_domain.cq5 --via virtual-graph
+    prototypes/us025_virtual_domain/py.sh -m prototypes.us025_virtual_domain.cq5 --via duckdb
+    prototypes/us025_virtual_domain/py.sh -m prototypes.us025_virtual_domain.cq5 --via duckdb --question "..." --json
 
 Native side: NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD (default database, as for the build),
 OPENAI_API_KEY (the query is embedded with text-embedding-3-large, as at build time).
@@ -106,16 +106,22 @@ def hop1(driver, question: str, top_k: int = 5, database: str | None = None) -> 
 
     from tools.query_tools import _escape_lucene
 
+    embedder = OpenAIEmbeddings(model="text-embedding-3-large")
     retriever = HybridCypherRetriever(
         driver=driver,
         vector_index_name="chunk-embeddings",
         fulltext_index_name="chunk-fulltext",
         retrieval_query=HOP1_RETRIEVAL_QUERY,
-        embedder=OpenAIEmbeddings(model="text-embedding-3-large"),
+        embedder=embedder,
         neo4j_database=database,
     )
+    # Embed the raw question; the Lucene escaping is for the fulltext side only.
     # get_search_results keeps the raw records (search() would format them to text)
-    result = retriever.get_search_results(query_text=_escape_lucene(question), top_k=top_k)
+    result = retriever.get_search_results(
+        query_text=_escape_lucene(question),
+        query_vector=embedder.embed_query(question),
+        top_k=top_k,
+    )
     return [dict(r) for r in result.records]
 
 

@@ -4,8 +4,8 @@ The file holds view definitions only. Every query through it re-reads the CSVs,
 so nothing from the domain layer is copied anywhere.
 
 Usage (from the repo root):
-    python -m prototypes.us025_virtual_domain.build_duckdb
-    python -m prototypes.us025_virtual_domain.build_duckdb --data-dir /abs/path/to/data
+    prototypes/us025_virtual_domain/py.sh -m prototypes.us025_virtual_domain.build_duckdb
+    prototypes/us025_virtual_domain/py.sh -m prototypes.us025_virtual_domain.build_duckdb --data-dir /abs/path/to/data
 """
 
 import argparse

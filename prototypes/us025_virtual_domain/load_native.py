@@ -9,8 +9,8 @@ no domain node and no ``CORRESPONDS_TO`` may exist in Neo4j.
 Needs NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD and OPENAI_API_KEY.
 
 Usage (from the repo root):
-    python -m prototypes.us025_virtual_domain.load_native
-    python -m prototypes.us025_virtual_domain.load_native --allow-nonempty
+    prototypes/us025_virtual_domain/py.sh -m prototypes.us025_virtual_domain.load_native
+    prototypes/us025_virtual_domain/py.sh -m prototypes.us025_virtual_domain.load_native --allow-nonempty
 """
 
 import argparse

@@ -337,6 +337,28 @@ class TestJoinCq5:
         assert (result["key_path"], result["part_ids"], result["suppliers"]) == ("none", [], [])
 
 
+class TestHop1Search:
+    def test_embeds_raw_question_and_escapes_only_fulltext(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        from prototypes.us025_virtual_domain import cq5
+
+        embedder = MagicMock()
+        embedder.embed_query.return_value = [0.1, 0.2]
+        retriever = MagicMock()
+        retriever.get_search_results.return_value.records = []
+        monkeypatch.setattr("neo4j_graphrag.embeddings.OpenAIEmbeddings", lambda **kw: embedder)
+        monkeypatch.setattr("neo4j_graphrag.retrievers.HybridCypherRetriever", lambda **kw: retriever)
+
+        question = "Which supplier's drawer-rails fail?"
+        cq5.hop1(MagicMock(), question)
+
+        embedder.embed_query.assert_called_once_with(question)
+        kwargs = retriever.get_search_results.call_args.kwargs
+        assert kwargs["query_vector"] == [0.1, 0.2]
+        assert kwargs["query_text"] != question and "\\-" in kwargs["query_text"]
+
+
 class TestVirtualGraphBackend:
     def test_one_lookup_per_key_on_vg_database(self, monkeypatch):
         from unittest.mock import MagicMock

@@ -19,6 +19,7 @@ CSV files ── DuckDB views ── Virtual Graph (Cypher)  /  Python (SQL)  / 
 
 | File | What it does |
 |---|---|
+| `py.sh` | Python through `uv` with the repo and prototype requirements; every Python step uses it |
 | `duckdb_domain.py` | One DuckDB **view** per CSV, plus the Python lookups (baseline hop 2, roll-up) |
 | `build_duckdb.py` | Writes `furniture.duckdb` (views only) for Virtual Graph |
 | `virtual_graph/` | `datasource.json`, `secret.json`, `schema.json`, read by Neo4j at boot |
@@ -42,29 +43,34 @@ CSV files ── DuckDB views ── Virtual Graph (Cypher)  /  Python (SQL)  / 
 | `SPIKE_PASSWORD` | `run_spike.sh`, `run_composite.sh` | Neo4j password for the spike container (default `us025password`) |
 | `FURNITURE_DATA_DIR`, `DUCKDB_JDBC_VERSION`, `NEO4J_IMAGE_TAG` | `run_spike.sh`, `run_ontop.sh` | Optional overrides |
 
-Python extras: `pip install -r prototypes/us025_virtual_domain/requirements.txt` (DuckDB,
-plus rdflib for one test).
+Python runs through `uv`, with no project venv: `py.sh` is
+`uv run --no-project --python 3.13 --with-requirements requirements.txt --with-requirements
+prototypes/us025_virtual_domain/requirements.txt python ...`, run from the repo root. The
+prototype's extras are DuckDB, plus rdflib for one test. `run_spike.sh` and `run_ontop.sh` use
+`py.sh` too.
 
-## Run order (owner's machine; needs Docker, Python and an OpenAI key)
+## Run order (owner's machine; needs Docker, `uv` and an OpenAI key)
 
 All commands run from the repo root.
 
 ```bash
+PY=prototypes/us025_virtual_domain/py.sh
+
 # 1. Spike: Neo4j Enterprise + Virtual Graph over the DuckDB views. Note the VG database name.
 prototypes/us025_virtual_domain/run_spike.sh
 export NEO4J_URI=bolt://localhost:7687 NEO4J_USER=neo4j NEO4J_PASSWORD=us025password
 export VG_DATABASE=<name printed by run_spike.sh>
 
 # 2. Native text side, from an empty database
-python -m prototypes.us025_virtual_domain.prepare_state
-python -m prototypes.us025_virtual_domain.load_native
+$PY -m prototypes.us025_virtual_domain.prepare_state
+$PY -m prototypes.us025_virtual_domain.load_native
 
 # 3. Keys
-python -m prototypes.us025_virtual_domain.stamp_keys
+$PY -m prototypes.us025_virtual_domain.stamp_keys
 
 # 4-5. CQ5, main path and baseline
-python -m prototypes.us025_virtual_domain.cq5 --via virtual-graph
-python -m prototypes.us025_virtual_domain.cq5 --via duckdb
+$PY -m prototypes.us025_virtual_domain.cq5 --via virtual-graph
+$PY -m prototypes.us025_virtual_domain.cq5 --via duckdb
 prototypes/us025_virtual_domain/run_composite.sh
 
 # 6. Optional: Ontop
@@ -77,7 +83,7 @@ The native graph can also live on another Neo4j (Desktop, Aura). Point `NEO4J_*`
 ## Tests (no Neo4j needed)
 
 ```bash
-pytest tests/unit/test_us025_virtual_domain.py
+prototypes/us025_virtual_domain/py.sh -m pytest tests/unit/test_us025_virtual_domain.py
 ```
 
 They cover the views (S-1085's suppliers and prices, a CSV edit visible without a rebuild),

@@ -14,7 +14,7 @@ chunks come from more than one product's reviews, or whose name matches more tha
 one part of that product, is reported as ambiguous and gets no key.
 
 Usage (from the repo root):
-    python -m prototypes.us025_virtual_domain.stamp_keys
+    prototypes/us025_virtual_domain/py.sh -m prototypes.us025_virtual_domain.stamp_keys
 """
 
 import re

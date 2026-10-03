@@ -15,7 +15,7 @@ export DUCKDB_JDBC_VERSION="${DUCKDB_JDBC_VERSION:-1.5.3.0}"
 export SPIKE_PASSWORD="${SPIKE_PASSWORD:-us025password}"
 
 echo "== 1/4 Build furniture.duckdb (views over $FURNITURE_DATA_DIR)"
-(cd "$REPO" && python -m prototypes.us025_virtual_domain.build_duckdb --data-dir "$FURNITURE_DATA_DIR")
+("$HERE/py.sh" -m prototypes.us025_virtual_domain.build_duckdb --data-dir "$FURNITURE_DATA_DIR")
 
 echo "== 2/4 DuckDB JDBC driver $DUCKDB_JDBC_VERSION"
 mkdir -p jdbc

@@ -132,20 +132,22 @@ References: [enabling Virtual Graph](https://neo4j.com/docs/virtual-graph/self-m
 ## Human Verification Guide
 
 On the owner's machine, from the repo root, with the env vars in
-`prototypes/us025_virtual_domain/README.md` (Docker, Python and `OPENAI_API_KEY` needed):
+`prototypes/us025_virtual_domain/README.md` (Docker, `uv` and `OPENAI_API_KEY` needed).
+`$PY` is `prototypes/us025_virtual_domain/py.sh`, which runs Python through `uv` with the repo
+and prototype requirements:
 
 1. **Spike:** `prototypes/us025_virtual_domain/run_spike.sh` starts Neo4j Enterprise with
    Virtual Graph and runs `spike.cypher` on every database. One of them returns Korean Metal
    Works 47.14 and Shanghai Metal Corp 40.82 for `S-1085`; set `VG_DATABASE` to that one. Fill
    in `SETUP.md`.
 2. **Empty database:** `MATCH (n) RETURN count(n)` returns 0 on the native database.
-3. **Build:** `python -m prototypes.us025_virtual_domain.prepare_state`, then
-   `python -m prototypes.us025_virtual_domain.load_native`. It processes all 10 review files,
+3. **Build:** `$PY -m prototypes.us025_virtual_domain.prepare_state`, then
+   `$PY -m prototypes.us025_virtual_domain.load_native`. It processes all 10 review files,
    and its post-build checks show `chunk-embeddings` and `chunk-fulltext` `ONLINE`, no
    non-text nodes and no `CORRESPONDS_TO`, ending in `OK`.
-4. **Keys:** `python -m prototypes.us025_virtual_domain.stamp_keys` reports the drawer-rails
+4. **Keys:** `$PY -m prototypes.us025_virtual_domain.stamp_keys` reports the drawer-rails
    part entity as stamped `S-1085` and lists any ambiguous or unmatched parts.
-5. **CQ5:** `python -m prototypes.us025_virtual_domain.cq5 --via virtual-graph` (main), then
+5. **CQ5:** `$PY -m prototypes.us025_virtual_domain.cq5 --via virtual-graph` (main), then
    `--via duckdb` (baseline). Each returns the two suppliers with prices, the key path and the
    timings.
 6. **Composite attempt:** `prototypes/us025_virtual_domain/run_composite.sh` prints rows or an

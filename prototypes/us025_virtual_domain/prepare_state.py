@@ -6,7 +6,7 @@ from an unmodified copy would process nothing. This keeps only what the text
 build needs, so all 10 files are pending again. The shared file is only read.
 
 Usage (from the repo root):
-    python -m prototypes.us025_virtual_domain.prepare_state
+    prototypes/us025_virtual_domain/py.sh -m prototypes.us025_virtual_domain.prepare_state
 """
 
 import json
