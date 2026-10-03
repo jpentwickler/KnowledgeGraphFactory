@@ -22,7 +22,7 @@ compared with selective materialization
 The risk is in Neo4j Virtual Graph (public preview, Enterprise-only when self-managed) and in
 Ontop against DuckDB, neither of which the repo has used.
 
-## Status: planned — plan revised after review on PR #1, awaiting go-ahead
+## Status: built, awaiting review — all 7 steps built and unit-tested (36 tests) in the cloud; the runs that need Docker, Neo4j Enterprise and OpenAI (spike, native build, CQ5, composite, Ontop) are for the owner's machine
 
 ## Context
 
@@ -70,13 +70,13 @@ References: [enabling Virtual Graph](https://neo4j.com/docs/virtual-graph/self-m
 - [ ] ⚑ **No structured data is materialized in Neo4j**: no domain rows, no keys-only domain
   nodes, no thin topology layer, no proxy nodes. The only domain information on the Neo4j side
   is `part_id` on text entities
-- [ ] ⚑ The domain layer (products, assemblies, parts, suppliers, part–supplier mapping) is read
+- [x] ⚑ The domain layer (products, assemblies, parts, suppliers, part–supplier mapping) is read
   from `examples/furniture_supply_chain/data/*.csv` through DuckDB views
 - [ ] The text side is the layer the pipeline builds today (review chunks with embeddings,
   `Review`, `Defect:__Entity__`, `Part:__Entity__`), built from an empty database through the
   existing `kg_build_graph(scope="unstructured")` path, so both `chunk-embeddings` and
   `chunk-fulltext` exist. `scope="structured"` and `scope="resolve"` are never run
-- [ ] The draft's Subject (defect observation) and Concept (SKOS) layers are not built; the
+- [x] The draft's Subject (defect observation) and Concept (SKOS) layers are not built; the
   concept hop is dropped from CQ5
 
 ### The bridge
@@ -100,7 +100,7 @@ References: [enabling Virtual Graph](https://neo4j.com/docs/virtual-graph/self-m
   prices, read live from `part_supplier_mapping.csv`
 - [ ] A single-statement composite query is attempted; whether it works on the version used, or
   the error it gives, is recorded
-- [ ] Baseline: the same second hop through plain Python + DuckDB (also zero-copy). This is the
+- [x] Baseline: the same second hop through plain Python + DuckDB (also zero-copy). This is the
   zero-copy proof if Virtual Graph cannot run
 - [ ] One parts-per-supplier roll-up answered through the virtual layer
 - [ ] Optional: the second hop through Ontop over DuckDB (SPARQL), with the generated SQL shown
@@ -110,44 +110,51 @@ References: [enabling Virtual Graph](https://neo4j.com/docs/virtual-graph/self-m
 - [ ] `FINDINGS.md` answers directly: **can zero-copy through Neo4j Virtual Graph replace
   selective materialization, and what does it cost?** It compares against doc 13 on traversal
   latency, freshness/sync, maturity, and what pushes down to SQL
-- [ ] It states the resolution finding without overclaiming: `stamp_keys.py` still matches on
+- [x] It states the resolution finding without overclaiming: `stamp_keys.py` still matches on
   part *name*, narrowed to one product by querying the virtual side at build time. Resolution
   has to query the source; it does not depend on materialized domain nodes
-- [ ] Prototype code and write-up live in `prototypes/us025_virtual_domain/`
+- [x] Prototype code and write-up live in `prototypes/us025_virtual_domain/`
 
 ### Out of scope
 
-- [ ] Scale and latency targets: seconds, not milliseconds, is accepted (latency is measured,
+- [x] Scale and latency targets: seconds, not milliseconds, is accepted (latency is measured,
   not optimized)
-- [ ] Virtualizing any layer other than the domain layer
-- [ ] Building Subject (defect observation) or Concept (SKOS) layers
-- [ ] Changing the production pipelines (`entity_resolution.py`, query builder, MCP tools) or
+- [x] Virtualizing any layer other than the domain layer
+- [x] Building Subject (defect observation) or Concept (SKOS) layers
+- [x] Changing the production pipelines (`entity_resolution.py`, query builder, MCP tools) or
   the shared `state/current_state.json`; this is a throwaway prototype
-- [ ] Editing doc 13 or `future_ideas.md` Idea 8. If the answer is yes, a follow-up story
+- [x] Editing doc 13 or `future_ideas.md` Idea 8. If the answer is yes, a follow-up story
   updates them
-- [ ] Parquet / lakehouse tables (DuckDB reads Parquet, so that is a later small step)
-- [ ] Regenerating our own CSVs. The furniture dataset comes from the Neo4j/DeepLearning.AI
+- [x] Parquet / lakehouse tables (DuckDB reads Parquet, so that is a later small step)
+- [x] Regenerating our own CSVs. The furniture dataset comes from the Neo4j/DeepLearning.AI
   course, which is fine for a learning prototype but must be replaced before any shippable demo
 
 ## Human Verification Guide
 
-On the owner's machine, with the env vars in `prototypes/us025_virtual_domain/README.md`:
+On the owner's machine, from the repo root, with the env vars in
+`prototypes/us025_virtual_domain/README.md` (Docker, Python and `OPENAI_API_KEY` needed):
 
-1. **Spike:** `./run_spike.sh` starts Neo4j Enterprise with Virtual Graph; `spike.cypher`
-   returns Korean Metal Works $47.14 and Shanghai Metal Corp $40.82 for `S-1085`. `SETUP.md`
-   has the version, edition and settings filled in.
+1. **Spike:** `prototypes/us025_virtual_domain/run_spike.sh` starts Neo4j Enterprise with
+   Virtual Graph and runs `spike.cypher` on every database. One of them returns Korean Metal
+   Works 47.14 and Shanghai Metal Corp 40.82 for `S-1085`; set `VG_DATABASE` to that one. Fill
+   in `SETUP.md`.
 2. **Empty database:** `MATCH (n) RETURN count(n)` returns 0 on the native database.
-3. **Build:** `python load_native.py` processes all 10 review files. `SHOW INDEXES` shows
-   `chunk-embeddings` and `chunk-fulltext` as `ONLINE`.
-4. **No domain nodes:** `MATCH (n) WHERE NOT n:__Entity__ AND NOT n:Chunk AND NOT n:Document
-   RETURN labels(n), count(*)` returns nothing, and no `CORRESPONDS_TO` exists.
-5. **Keys:** `python stamp_keys.py` stamps `part_id = 'S-1085'` on the drawer-rails part
-   entity and lists any ambiguous or unmatched parts.
-6. **CQ5:** `python cq5.py --via virtual-graph` (main), then `--via duckdb` (baseline), each
-   returns the two suppliers with prices. The composite attempt's result is in `FINDINGS.md`.
-7. **Live:** edit one of those prices in `part_supplier_mapping.csv`, re-run step 6, and see
-   the new price without any rebuild.
-8. Read `FINDINGS.md` and check it answers the zero-copy question against doc 13.
+3. **Build:** `python -m prototypes.us025_virtual_domain.prepare_state`, then
+   `python -m prototypes.us025_virtual_domain.load_native`. It processes all 10 review files,
+   and its post-build checks show `chunk-embeddings` and `chunk-fulltext` `ONLINE`, no
+   non-text nodes and no `CORRESPONDS_TO`, ending in `OK`.
+4. **Keys:** `python -m prototypes.us025_virtual_domain.stamp_keys` reports the drawer-rails
+   part entity as stamped `S-1085` and lists any ambiguous or unmatched parts.
+5. **CQ5:** `python -m prototypes.us025_virtual_domain.cq5 --via virtual-graph` (main), then
+   `--via duckdb` (baseline). Each returns the two suppliers with prices, the key path and the
+   timings.
+6. **Composite attempt:** `prototypes/us025_virtual_domain/run_composite.sh` prints rows or an
+   error.
+7. **Live:** edit one of those prices in `part_supplier_mapping.csv`, re-run step 5, and see
+   the new price without any rebuild. Then revert the edit.
+8. **Optional:** `prototypes/us025_virtual_domain/run_ontop.sh` prints Ontop's generated SQL.
+9. Fill in section 2 of `prototypes/us025_virtual_domain/FINDINGS.md` and decide section 3,
+   the zero-copy answer against doc 13.
 
 ## Notes
 
@@ -265,3 +272,25 @@ machine.
   passes (no production code changes).
 - On the owner's machine: the Human Verification Guide above. `FINDINGS.md` records results and
   any path that could not run.
+
+### Build notes (2026-10-03)
+
+- The Virtual Graph config follows the DuckDB ("lakegraph") setup in the community playground:
+  `datasource.json` type `duckdb`, upper-case column names in `schema.json`, the DuckDB JDBC
+  jar (1.5.3.0 from Maven) in `/var/lib/neo4j/lib`. One difference: the playground
+  materializes DuckDB **tables**, while this kit uses **views** so the CSV stays live.
+  `SETUP.md` lists this as the first suspect if the boot fails.
+- The virtual graph's database name isn't documented for the self-managed preview, so
+  `run_spike.sh` runs the spike query on every database and `cq5.py` reads `VG_DATABASE`.
+- The composite attempt runs through `run_composite.sh`, which creates the composite database
+  `us025` with aliases `native` and `domain`.
+- Ontop gets its own copy of the views file (`furniture_ontop.duckdb`), so it doesn't contend
+  with Virtual Graph for DuckDB's file lock. Ontop couldn't be downloaded in the cloud, so its
+  mapping and SPARQL are unit-tested by materializing the mapping with rdflib. Ontop's own SQL
+  generation is checked by `run_ontop.sh`.
+- Hop 1 uses the strict path (defect `OBSERVED_IN` part) and falls back to parts extracted
+  from the same chunk only when the strict path yields no keys. The output says which path
+  was used.
+- Product names come from the `Document.title` that the text builder sets from each file's
+  H1; the H1 of the file at `Document.path` is the fallback.
+

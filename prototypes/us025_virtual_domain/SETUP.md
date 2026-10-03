@@ -58,6 +58,9 @@ part_id  | part         | supplier            | unit_cost | lead_time_days
   against DuckDB, while the views' columns are lower-case.
 - **DuckDB file version.** The JDBC driver must read the file the Python `duckdb` wrote. Keep
   both on the same minor version (1.5.x), or set `DUCKDB_JDBC_VERSION` to match.
+- **Read-only mount.** `furniture.duckdb` is mounted `:ro`, as in the playground. If the
+  driver insists on opening it read-write, drop `:ro` for that one mount in
+  `docker-compose.yml`. It holds views only, so nothing can be written into it that matters.
 - **Invalid config fails the boot.** `docker logs us025-neo4j` shows why.
 - **Licence.** Enterprise with `NEO4J_ACCEPT_LICENSE_AGREEMENT=yes` is an evaluation licence.
   Check that it is acceptable for this use.

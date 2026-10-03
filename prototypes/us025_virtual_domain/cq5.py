@@ -16,7 +16,7 @@ Usage (from the repo root):
     python -m prototypes.us025_virtual_domain.cq5 --via duckdb
     python -m prototypes.us025_virtual_domain.cq5 --via duckdb --question "..." --json
 
-Native side: NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD (+ NEO4J_DATABASE, optional),
+Native side: NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD (default database, as for the build),
 OPENAI_API_KEY (the query is embedded with text-embedding-3-large, as at build time).
 Virtual Graph: VG_URI, VG_USER, VG_PASSWORD (default to the NEO4J_* values) and
 VG_DATABASE (the virtual graph's database name, from run_spike.sh).
@@ -180,7 +180,7 @@ def run(via: str, question: str, top_k: int) -> dict:
     native = get_neo4j_driver()
     try:
         started = time.perf_counter()
-        hits = hop1(native, question, top_k, database=os.environ.get("NEO4J_DATABASE"))
+        hits = hop1(native, question, top_k)
         hop1_seconds = round(time.perf_counter() - started, 3)
 
         answer = join_cq5(hits, fetch)
