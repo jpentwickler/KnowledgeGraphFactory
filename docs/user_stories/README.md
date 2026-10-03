@@ -27,6 +27,17 @@
 | 8 | 1-2 weeks | Complex, some unknowns |
 | 13 | 2+ weeks | Should probably split |
 
+## Status line
+
+The `## Status:` line is the source of truth for a story's state. It starts with one stage word,
+then `—` and free text (see `WORKFLOW.md` in `jpentwickler/claude-skills`):
+
+`TODO` or `drafted` → `picked up` → `planned` → `built, awaiting review` → `changes requested` →
+`approved` → `merged` → `verified on the mini` → `DONE`
+
+A worker writes the stages up to `built, awaiting review`; the hub writes the rest. Stories
+closed before this convention keep a plain `DONE`.
+
 ## User Story Template
 
 ```markdown
@@ -37,6 +48,8 @@
 **As a** [persona]
 **I want** [capability]
 **So that** [benefit]
+
+## Status: TODO — [free text]
 
 ## Story Points: [N]
 
