@@ -292,3 +292,82 @@ class TestResolve:
         calls = {c.args[0]: c.kwargs for c in session.run.call_args_list[1:]}
         assert calls[STAMP] == {"rows": [{"id": "e1", "part_id": "S-1085"}]}
         assert calls[UNSTAMP] == {"ids": ["e2"]}
+
+
+# ---------------------------------------------------------------------------
+# CQ5 join and Virtual Graph hop 2 (step 4)
+# ---------------------------------------------------------------------------
+
+# What hop 1 returns for the drawer-rails complaint once keys are stamped.
+HELSINGBORG_HITS = [
+    {"chunk": "The drawer rails were the worst part, they were defective.", "score": 0.91,
+     "strict": [{"defect": "defective drawer rails", "part": "drawer rails", "part_id": "S-1085"}],
+     "loose": [{"part": "drawer rails", "part_id": "S-1085"}]},
+    {"chunk": "Drawers stick after a month.", "score": 0.74, "strict": [],
+     "loose": [{"part": None, "part_id": None}]},
+]
+
+
+class TestJoinCq5:
+    def test_strict_path_keys_reach_hop2(self):
+        from prototypes.us025_virtual_domain.cq5 import join_cq5
+
+        seen = []
+        result = join_cq5(HELSINGBORG_HITS, lambda keys: seen.append(keys) or [{"part_id": "S-1085"}])
+        assert seen == [["S-1085"]]
+        assert result["key_path"] == "strict"
+        assert result["suppliers"] == [{"part_id": "S-1085"}]
+
+    def test_loose_path_only_without_strict_keys(self):
+        from prototypes.us025_virtual_domain.cq5 import keys_from_hop1
+
+        hits = [{"strict": [], "loose": [{"part": "drawer rails", "part_id": "S-1085"}]}]
+        assert keys_from_hop1(hits) == {
+            "path": "loose", "part_ids": ["S-1085"],
+            "evidence": [{"part": "drawer rails", "part_id": "S-1085"}],
+        }
+
+    def test_no_keys_skips_hop2(self):
+        from prototypes.us025_virtual_domain.cq5 import join_cq5
+
+        def fail(keys):
+            raise AssertionError("hop 2 must not run without keys")
+
+        result = join_cq5([{"strict": [], "loose": [{"part_id": None}]}], fail)
+        assert (result["key_path"], result["part_ids"], result["suppliers"]) == ("none", [], [])
+
+
+class TestVirtualGraphBackend:
+    def test_one_lookup_per_key_on_vg_database(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        from prototypes.us025_virtual_domain import cq5
+
+        session = MagicMock()
+        session.run.side_effect = lambda q, part_id=None: [
+            {"part_id": part_id, "supplier_name": "Shanghai Metal Corp"},
+            {"part_id": part_id, "supplier_name": "Korean Metal Works"},
+        ]
+        driver = MagicMock()
+        driver.session.return_value.__enter__.return_value = session
+        monkeypatch.setenv("VG_DATABASE", "furniture")
+        monkeypatch.setattr("utils.get_neo4j_driver", lambda **kw: driver)
+
+        fetch, _, _ = cq5.virtual_graph_backend()
+        rows = fetch(["S-1085", "S-1078"])
+
+        driver.session.assert_called_with(database="furniture")
+        assert [c.kwargs["part_id"] for c in session.run.call_args_list] == ["S-1085", "S-1078"]
+        assert [(r["part_id"], r["supplier_name"]) for r in rows][:2] == [
+            ("S-1078", "Korean Metal Works"), ("S-1078", "Shanghai Metal Corp")]
+
+    def test_requires_vg_database(self, monkeypatch):
+        from prototypes.us025_virtual_domain import cq5
+
+        monkeypatch.delenv("VG_DATABASE", raising=False)
+        with pytest.raises(SystemExit):
+            cq5.virtual_graph_backend()
+
+    def test_composite_attempt_uses_both_aliases(self):
+        text = (PROTOTYPE_DIR / "cq5_composite.cypher").read_text()
+        assert "USE us025.native" in text and "USE us025.domain" in text
