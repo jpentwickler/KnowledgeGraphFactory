@@ -1,0 +1,3 @@
+# US025 prototype only (on top of the repo requirements.txt)
+# Keep the minor version in step with the DuckDB JDBC driver in run_spike.sh.
+duckdb>=1.5,<1.6
