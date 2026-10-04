@@ -52,6 +52,18 @@ for db in $("${CS[@]}" --format plain "SHOW DATABASES YIELD name WHERE name <> '
   if "${CS[@]}" -d "$db" < spike.cypher; then :; else echo "   (failed on '$db')"; fi
 done
 
+echo "== Native database for the text graph"
+# Virtual Graph takes over the default database `neo4j`. Create a standard database
+# `native` and make it the default, so the Python scripts write the text graph there.
+"${CS[@]}" -d system <<'CYPHER'
+CREATE DATABASE native IF NOT EXISTS WAIT;
+STOP DATABASE neo4j WAIT;
+CALL dbms.setDefaultDatabase('native');
+START DATABASE neo4j WAIT;
+CYPHER
+"${CS[@]}" "SHOW DATABASES YIELD name, type, currentStatus, default RETURN name, type, currentStatus, default"
+echo "Use VG_DATABASE=neo4j, and NEO4J_DATABASE=native for run_composite.sh."
+
 echo
 echo "Record the version, edition, settings and result in SETUP.md."
 echo "Virtual Graph log lines:"; docker logs us025-neo4j 2>&1 | grep -i "virtual" | tail -20 || true

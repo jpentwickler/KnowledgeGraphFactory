@@ -55,10 +55,12 @@ RETURN p.part_id AS part_id, p.name AS part_name, sup.supplier_id AS supplier_id
        s.lead_time_days AS lead_time_days, s.preferred_supplier AS preferred_supplier
 """
 
+# Aliases must not repeat a source column name: Virtual Graph 1.0-alpha-01 generates
+# `GROUP BY "supplier_id"`, which DuckDB rejects as ambiguous. rollup() renames them back.
 VG_PARTS_PER_SUPPLIER = """
 MATCH (p:Part)-[:SUPPLIED_BY]->(s:Supplier)
-RETURN s.supplier_id AS supplier_id, s.name AS supplier_name, count(DISTINCT p) AS parts
-ORDER BY parts DESC, supplier_name
+RETURN s.supplier_id AS sid, s.name AS sname, count(DISTINCT p) AS parts
+ORDER BY parts DESC, sname
 """
 
 
@@ -154,7 +156,8 @@ def virtual_graph_backend():
 
     def rollup() -> list[dict]:
         with driver.session(database=database) as session:
-            return [dict(r) for r in session.run(VG_PARTS_PER_SUPPLIER)]
+            return [{"supplier_id": r["sid"], "supplier_name": r["sname"], "parts": r["parts"]}
+                    for r in session.run(VG_PARTS_PER_SUPPLIER)]
 
     return fetch, rollup, driver.close
 

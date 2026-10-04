@@ -34,6 +34,8 @@ RETURN labels(n) AS labels, count(*) AS count
 def check_native_graph(driver) -> dict:
     """Post-build checks: indexes online, no domain nodes, no CORRESPONDS_TO."""
     with driver.session() as session:
+        # Freshly created indexes start POPULATING; wait so the check sees their final state.
+        session.run("CALL db.awaitIndexes(300)").consume()
         indexes = {
             r["name"]: r["state"]
             for r in session.run("SHOW INDEXES YIELD name, state WHERE name IN $names RETURN name, state",

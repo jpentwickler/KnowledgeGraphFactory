@@ -11,7 +11,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 cd "$REPO"
 
-exec uv run --no-project --python 3.13 \
+# Load the repo's .env (Neo4j, OpenAI) when present; only the MCP server loads it itself.
+ENV_ARGS=()
+[ -f .env ] && ENV_ARGS=(--env-file .env)
+
+exec uv run --no-project --python 3.13 "${ENV_ARGS[@]}" \
   --with-requirements requirements.txt \
   --with-requirements prototypes/us025_virtual_domain/requirements.txt \
   python "$@"

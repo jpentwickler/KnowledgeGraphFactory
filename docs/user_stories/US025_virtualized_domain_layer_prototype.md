@@ -22,7 +22,7 @@ compared with selective materialization
 The risk is in Neo4j Virtual Graph (public preview, Enterprise-only when self-managed) and in
 Ontop against DuckDB, neither of which the repo has used.
 
-## Status: built, awaiting review — all 7 steps built and unit-tested (37 tests) in the cloud, and the second review round (uv via `py.sh`, raw-question embedding in hop 1) is fixed in 36c53f1; the runs that need Docker, Neo4j Enterprise and OpenAI (spike, native build, CQ5, composite, Ontop) are for the owner's machine
+## Status: approved — hub review done (2 rounds), all checks run on the owner's Mac on 2026-10-04: spike, native build, key stamping, CQ5 via Virtual Graph and DuckDB, live edit, composite attempt (not possible on this version), Ontop. Answer in `prototypes/us025_virtual_domain/FINDINGS.md`: zero-copy works for CQ5; resolution recall and Virtual Graph maturity are the costs. Merge on the owner's word
 
 ## Context
 
@@ -67,12 +67,12 @@ References: [enabling Virtual Graph](https://neo4j.com/docs/virtual-graph/self-m
 
 ### What stays native, what goes virtual
 
-- [ ] ⚑ **No structured data is materialized in Neo4j**: no domain rows, no keys-only domain
+- [x] ⚑ **No structured data is materialized in Neo4j**: no domain rows, no keys-only domain
   nodes, no thin topology layer, no proxy nodes. The only domain information on the Neo4j side
   is `part_id` on text entities
 - [x] ⚑ The domain layer (products, assemblies, parts, suppliers, part–supplier mapping) is read
   from `examples/furniture_supply_chain/data/*.csv` through DuckDB views
-- [ ] The text side is the layer the pipeline builds today (review chunks with embeddings,
+- [x] The text side is the layer the pipeline builds today (review chunks with embeddings,
   `Review`, `Defect:__Entity__`, `Part:__Entity__`), built from an empty database through the
   existing `kg_build_graph(scope="unstructured")` path, so both `chunk-embeddings` and
   `chunk-fulltext` exist. `scope="structured"` and `scope="resolve"` are never run
@@ -81,33 +81,33 @@ References: [enabling Virtual Graph](https://neo4j.com/docs/virtual-graph/self-m
 
 ### The bridge
 
-- [ ] ⚑ Every bridging `Part:__Entity__` carries a `part_id` identical to the CSV key
+- [x] ⚑ Every bridging `Part:__Entity__` carries a `part_id` identical to the CSV key
   (e.g. `S-1085`). The product it belongs to comes from its source document; a part linked to
   more than one product is reported as ambiguous and gets no key
 
 ### Virtual Graph spike
 
-- [ ] ⚑ Self-managed Virtual Graph runs on Neo4j Enterprise against the DuckDB views and answers
+- [x] ⚑ Self-managed Virtual Graph runs on Neo4j Enterprise against the DuckDB views and answers
   `(:Part {part_id:'S-1085'})-[:SUPPLIED_BY]->(:Supplier)` with prices from the CSV. Version,
   edition and settings are recorded in `SETUP.md`. If it cannot run, the reason is recorded
 
 ### CQ5 traceability, end to end
 
-- [ ] ⚑ CQ5 runs as two Cypher queries joined in app code: native Neo4j (hybrid search →
+- [x] ⚑ CQ5 runs as two Cypher queries joined in app code: native Neo4j (hybrid search →
   chunk → defect → part entity → `part_id`s), then the virtual graph (parts → suppliers with
   prices)
-- [ ] ⚑ The result returns **Shanghai Metal Corp** and **Korean Metal Works** with their two
+- [x] ⚑ The result returns **Shanghai Metal Corp** and **Korean Metal Works** with their two
   prices, read live from `part_supplier_mapping.csv`
-- [ ] A single-statement composite query is attempted; whether it works on the version used, or
+- [x] A single-statement composite query is attempted; whether it works on the version used, or
   the error it gives, is recorded
 - [x] Baseline: the same second hop through plain Python + DuckDB (also zero-copy). This is the
   zero-copy proof if Virtual Graph cannot run
-- [ ] One parts-per-supplier roll-up answered through the virtual layer
-- [ ] Optional: the second hop through Ontop over DuckDB (SPARQL), with the generated SQL shown
+- [x] One parts-per-supplier roll-up answered through the virtual layer
+- [x] Optional: the second hop through Ontop over DuckDB (SPARQL), with the generated SQL shown
 
 ### Findings
 
-- [ ] `FINDINGS.md` answers directly: **can zero-copy through Neo4j Virtual Graph replace
+- [x] `FINDINGS.md` answers directly: **can zero-copy through Neo4j Virtual Graph replace
   selective materialization, and what does it cost?** It compares against doc 13 on traversal
   latency, freshness/sync, maturity, and what pushes down to SQL
 - [x] It states the resolution finding without overclaiming: `stamp_keys.py` still matches on

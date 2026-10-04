@@ -17,7 +17,7 @@ services:
       # neo4j-graphrag (the text builder) uses APOC; this instance also hosts the native graph
       - NEO4J_PLUGINS=["apoc"]
     volumes:
-      - "./jdbc/duckdb_jdbc-${DUCKDB_JDBC_VERSION:-1.5.3.0}.jar:/var/lib/neo4j/lib/duckdb_jdbc-${DUCKDB_JDBC_VERSION:-1.5.3.0}.jar:ro"
+      - "./jdbc/duckdb_jdbc-${DUCKDB_JDBC_VERSION:-1.5.3.0}.jar:/var/lib/neo4j/lib/duckdb_jdbc-${DUCKDB_JDBC_VERSION:-1.5.3.0}.jar"
       - "./virtual_graph:/nvg_home:ro"
       - "./furniture.duckdb:/duckdb-data/furniture.duckdb:ro"
       # The views hold absolute CSV paths, so the CSVs are mounted at the same path

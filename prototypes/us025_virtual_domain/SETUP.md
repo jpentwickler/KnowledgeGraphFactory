@@ -1,8 +1,7 @@
 # US025 Virtual Graph spike: setup record
 
-Fill this in after running `./run_spike.sh` on the owner's machine. The cloud worker
-that built the kit had no Docker daemon and could not reach neo4j.com, so nothing below has
-been run yet.
+Run on the owner's Mac on 2026-10-04 (OrbStack 2.2.3, Docker 29.4.0). The kit was built by a
+cloud worker without Docker; the record below is from the first real run.
 
 ## What the kit does
 
@@ -37,15 +36,33 @@ part_id  | part         | supplier            | unit_cost | lead_time_days
 
 | Item | Value |
 |---|---|
-| Date run | |
+| Date run | 2026-10-04 |
 | Neo4j image tag | `2026.09.0-enterprise` (default) |
-| `dbms.components()` version / edition | |
+| `dbms.components()` version / edition | Neo4j Kernel `2026.09.0` enterprise · Cypher `5`, `25` · **Virtual Graph `1.0-alpha-01`** |
 | DuckDB JDBC driver | `1.5.3.0` (default) |
-| Python `duckdb` that wrote `furniture.duckdb` | |
-| Virtual graph database name (from `SHOW DATABASES`) | |
-| Settings that differed from the kit | |
-| Spike query result | |
-| Did it boot first time? If not, the error | |
+| Python `duckdb` that wrote `furniture.duckdb` | `1.5.6` (reads fine with JDBC 1.5.3.0) |
+| Virtual graph database name (from `SHOW DATABASES`) | **`neo4j`**: the virtual graph takes over the default database (`type: "virtual graph"`) |
+| Settings that differed from the kit | The JDBC jar mount must be writable: the image's entrypoint `chown`s `/var/lib/neo4j/lib` (fixed in `docker-compose.yml`). Native text graph in its own database, see below |
+| Spike query result | As expected: S-1085 Drawer Rails → Shanghai Metal Corp 40.82 (26 days), Korean Metal Works 47.14 (17 days) |
+| Did it boot first time? If not, the error | No. `chown: changing ownership of '/var/lib/neo4j/lib/duckdb_jdbc-1.5.3.0.jar': Read-only file system`. Booted after dropping `:ro` on the jar mount. Views (not tables), upper-case column names and the `:ro` mount of `furniture.duckdb` all worked as written |
+
+### Native and virtual on one instance
+
+Virtual Graph occupies the default database `neo4j`, but the instance still hosts ordinary
+databases. `run_spike.sh` now creates a standard database `native` for the text graph and makes
+it the default, so the Python scripts (which use the server's default database) write there:
+
+```cypher
+// on system
+CREATE DATABASE native IF NOT EXISTS WAIT;
+STOP DATABASE neo4j WAIT;                 // the old default must be stopped to change it
+CALL dbms.setDefaultDatabase('native');
+START DATABASE neo4j WAIT;
+```
+
+Result: `native` standard, default · `neo4j` virtual graph · the spike query still answers on
+`neo4j`. So `VG_DATABASE=neo4j`, and `NEO4J_DATABASE=native` for `run_composite.sh`. These
+databases live in the container: `docker compose down` deletes them.
 
 ## Known risks to check first if it fails
 
@@ -58,9 +75,8 @@ part_id  | part         | supplier            | unit_cost | lead_time_days
   against DuckDB, while the views' columns are lower-case.
 - **DuckDB file version.** The JDBC driver must read the file the Python `duckdb` wrote. Keep
   both on the same minor version (1.5.x), or set `DUCKDB_JDBC_VERSION` to match.
-- **Read-only mount.** `furniture.duckdb` is mounted `:ro`, as in the playground. If the
-  driver insists on opening it read-write, drop `:ro` for that one mount in
-  `docker-compose.yml`. It holds views only, so nothing can be written into it that matters.
+- **Read-only mounts.** `furniture.duckdb` mounted `:ro` works (Neo4j opens read connections
+  only). The JDBC jar must **not** be `:ro`: the entrypoint `chown`s `/var/lib/neo4j/lib`.
 - **Invalid config fails the boot.** `docker logs us025-neo4j` shows why.
 - **Licence.** Enterprise with `NEO4J_ACCEPT_LICENSE_AGREEMENT=yes` is an evaluation licence.
   Check that it is acceptable for this use.

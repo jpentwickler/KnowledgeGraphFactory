@@ -4,10 +4,9 @@
 materialization in `docs/architecture/13_multi_source_virtualization.md` (§2.1, §5) and
 `future_ideas.md` Idea 8, and what does it cost?
 
-**Status:** the kit is built and unit-tested in a cloud session without Docker, Neo4j or
-access to neo4j.com. Section 1 records what building it established. Section 2 holds the
-results that need the run on the owner's machine (README, "Run order"). **The answer in
-section 3 stays open until section 2 is filled in.**
+**Status:** built and unit-tested in a cloud session, then run end to end on the owner's Mac on
+2026-10-04 (Neo4j Enterprise 2026.09.0, Virtual Graph 1.0-alpha-01, DuckDB 1.5, OrbStack).
+Section 1 records what building it established, section 2 the run, section 3 the answer.
 
 ## 1. Established while building
 
@@ -74,29 +73,48 @@ the boundary. Questions that filter or traverse deep into the domain side are wh
 and pushdown quality decide the answer, and this prototype measures only the CQ5 hop and one
 roll-up.
 
-## 2. Results from the owner's machine (to fill in)
+## 2. Results from the owner's machine (2026-10-04)
 
 | Check | Result |
 |---|---|
-| Spike: Virtual Graph boots on Neo4j Enterprise with the DuckDB views (see `SETUP.md`) | |
-| Spike query: S-1085 → Korean Metal Works 47.14, Shanghai Metal Corp 40.82 | |
-| Native build from an empty DB: 10 files, both indexes `ONLINE`, no domain nodes, no `CORRESPONDS_TO` | |
-| `stamp_keys.py`: stamped / ambiguous / unmatched counts; drawer rails → S-1085? | |
-| `cq5 --via virtual-graph`: suppliers + prices; key path (strict/loose); hop 1 s / hop 2 s / roll-up s | |
-| `cq5 --via duckdb`: same answer? hop 2 s / roll-up s | |
-| Live edit: price changed in the CSV shows up with no rebuild (virtual-graph and duckdb) | |
-| Composite single statement (`run_composite.sh`): rows, or the error | |
-| Ontop (optional): generated SQL for hop 2 and the roll-up | |
+| Spike: Virtual Graph boots on Neo4j Enterprise with the DuckDB views (`SETUP.md`) | **Yes**, after one fix: the JDBC jar mount must be writable (the entrypoint `chown`s `lib/`). Views over CSVs, upper-case column names and the read-only DuckDB file all worked as written |
+| Spike query: S-1085 → Korean Metal Works 47.14, Shanghai Metal Corp 40.82 | **Yes**, exactly. The virtual graph takes over the default database `neo4j` |
+| Native build from an empty DB | **Yes.** Into a standard database `native` on the same instance (made default). 10/10 files, 70 chunks, 130 entities (25 `Part`, 52 `Defect`, 21 `Review`, …), both indexes `ONLINE`, 0 non-text nodes, 0 `CORRESPONDS_TO`. GPT-4o + `text-embedding-3-large`, ~54 s |
+| `stamp_keys.py` | **2 stamped, 1 ambiguous, 22 unmatched.** Both "drawer rails" entities (two casings, not merged by the builder) → **S-1085**, not S-1078. "drawer" is ambiguous (two products). The 22 unmatched are names that are not CSV part names: "Metal Rails", "Drawer Handle", "drawer slide mechanism", "Cushions", "Slats", "Instructions", … |
+| `cq5 --via virtual-graph` | **Correct.** Strict path (complaint chunk → `Defect` "Uneven Metal Edges", "Rough Sliding Mechanisms" → `Part` "drawer rails") → `['S-1085']` → Korean Metal Works $47.14 (17 d), Shanghai Metal Corp $40.82 (26 d). Hop 1 0.58 s (mostly the OpenAI embedding call), **hop 2 0.016 s**, roll-up 0.023 s |
+| `cq5 --via duckdb` | **Same answer.** Hop 1 0.52 s, hop 2 0.014 s, roll-up 0.010 s |
+| Roll-up through Virtual Graph | **Failed first:** `RETURN s.supplier_id AS supplier_id … count(DISTINCT p)` made Virtual Graph generate `GROUP BY "supplier_id"`, which DuckDB rejects as ambiguous (`Binder Error: Ambiguous reference to column name "supplier_id"`). Works when the aliases do not repeat a source column name (`AS sid`, `AS sname`); `cq5.py` now does that. A pushdown bug in the alpha |
+| Live edit | **Yes.** Korean Metal Works' S-1085 price set to $99.99 in the CSV: the spike query, `cq5 --via virtual-graph` and `cq5 --via duckdb` all returned $99.99 at once, with no restart or rebuild. CSV restored |
+| Composite single statement (`run_composite.sh`) | **Not possible.** The composite `us025` accepts `native` as a constituent, but the alias to the virtual graph is registered and unusable: `SHOW DATABASES` lists only `us025.native`, and `USE us025.domain` fails with `42N00 graph reference not found`. A virtual graph cannot be a composite constituent on this version, as Neo4j's roadmap note implies |
+| Ontop (optional) | **Works**, same answers for hop 2 and the roll-up. Generated SQL for hop 2 is correct but naive: `part_supplier_mapping` is joined twice and a `SELECT 1 … LIMIT 1` existence check is added. The roll-up SQL is a clean `GROUP BY` |
 
 ## 3. Answer
 
-**Open, pending section 2.** The decision rule, set before the run:
+**Yes: zero-copy through Neo4j Virtual Graph can carry CQ5-shaped questions with nothing
+structured in Neo4j**, with two qualifications. Measured against the decision rule set before
+the run: the spike booted, CQ5 through Virtual Graph returned the right rows live from the CSV,
+and hop 2 and the roll-up took milliseconds.
 
-- **Yes, zero-copy can replace selective materialization for this shape of question**, if the
-  spike boots, CQ5 via Virtual Graph returns the right rows live from the CSV, and hop 2 and
-  the roll-up stay within seconds. That would mean a follow-up story to update doc 13 §2.1 and
-  Idea 8, keeping the preview and Enterprise caveats as risks.
-- **No, or not yet**, if Virtual Graph cannot run, cannot read the views, or pushes down
-  poorly. The Python/DuckDB two-hop still shows zero-copy works architecturally, but through
-  app code. That is doc 13's enrichment router with nothing materialized, which gives up
-  in-graph domain traversal.
+- **The bridge works as a key, joined in app code.** A single Cypher statement across native and
+  virtual is not available (no composite constituent), so the native → virtual join stays in
+  application code, as doc 13's enrichment router does. One `part_id` property on the text side
+  is the whole bridge.
+- **The weak link is resolution, not virtualization.** CQ5 worked because "drawer rails" is the
+  CSV's part name. 22 of 25 extracted parts carry names the CSV does not use ("Metal Rails",
+  "drawer slide mechanism"), so they got no key. Exact name matching scoped by product is
+  precise (S-1085, never S-1078) but has low recall. That is independent of zero-copy versus
+  materialization: doc 13's approach would need the same resolution step.
+- **Maturity is the cost.** Virtual Graph is a 1.0-alpha preview on Enterprise only, with
+  `internal.*` settings, boot-time config, a writable-jar quirk, a `GROUP BY` alias bug, and no
+  federation. Doc 13's selective materialization runs on GA Neo4j today.
+- **Not tested here:** deep domain-side traversal (Product → Assembly → Part → Supplier with
+  filters) at scale, where doc 13 keeps traversal inside Neo4j. CQ5 needs one domain hop.
+
+**Recommendation:** zero-copy is viable as the target, kept behind the same `DataSource`/router
+seam doc 13 already has, so a selective-materialization fallback remains possible while Virtual
+Graph is in preview. Follow-ups:
+1. Update doc 13 §2.1 and `future_ideas.md` Idea 8 with zero-copy as the target, with these
+   caveats (separate story, as decided).
+2. Improve key resolution recall (synonyms or an LLM step that maps an extracted part name to a
+   part of that product, still answering with a key), measured on all 25 parts.
+3. Re-run on Virtual Graph GA, checking federation and the `GROUP BY` alias bug.
