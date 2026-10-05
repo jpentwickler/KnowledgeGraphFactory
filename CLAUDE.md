@@ -165,6 +165,9 @@ kg-factory/
 ├── mcp_server/            # MCP server exposing agents as tools
 │   └── server.py
 │
+├── prototypes/            # Throwaway spikes, not production code
+│   └── us025_virtual_domain/  # US025: domain layer read from CSVs via Virtual Graph/DuckDB (see its README)
+│
 ├── examples/              # Test projects for hybrid MCP + CLAUDE.md
 │   ├── furniture_supply_chain/
 │   │   ├── CLAUDE.md      # User-facing workflow guidance

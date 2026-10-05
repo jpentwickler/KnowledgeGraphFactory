@@ -1,0 +1,8 @@
+# Roll-up via Ontop: distinct parts per supplier.
+PREFIX : <http://example.org/us025/furniture#>
+SELECT ?supplierName (COUNT(DISTINCT ?part) AS ?parts) WHERE {
+  ?part :suppliedBy ?supplier .
+  ?supplier :name ?supplierName .
+}
+GROUP BY ?supplierName
+ORDER BY DESC(?parts) ?supplierName

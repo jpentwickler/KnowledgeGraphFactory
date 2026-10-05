@@ -1,0 +1,4 @@
+{
+  "type": "duckdb",
+  "path": "/duckdb-data/furniture.duckdb"
+}

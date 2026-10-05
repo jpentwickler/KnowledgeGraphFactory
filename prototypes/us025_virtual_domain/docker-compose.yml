@@ -1,0 +1,24 @@
+# Neo4j Enterprise with Virtual Graph over the furniture DuckDB views (US025 spike).
+# Modelled on the lakegraph setup in github.com/ikwattro/neo4j-virtual-graph-playground.
+# Start it with ./run_spike.sh, which sets the variables below.
+services:
+  neo4j:
+    image: neo4j:${NEO4J_IMAGE_TAG:-2026.09.0-enterprise}
+    container_name: us025-neo4j
+    ports:
+      - 7474:7474
+      - 7687:7687
+    environment:
+      - NEO4J_ACCEPT_LICENSE_AGREEMENT=yes
+      - NEO4J_AUTH=neo4j/${SPIKE_PASSWORD:-us025password}
+      # Virtual Graph (public preview; read at boot)
+      - NEO4J_internal_virtual__graph_enabled=true
+      - NEO4J_internal_virtual__graph_home=/nvg_home
+      # neo4j-graphrag (the text builder) uses APOC; this instance also hosts the native graph
+      - NEO4J_PLUGINS=["apoc"]
+    volumes:
+      - "./jdbc/duckdb_jdbc-${DUCKDB_JDBC_VERSION:-1.5.3.0}.jar:/var/lib/neo4j/lib/duckdb_jdbc-${DUCKDB_JDBC_VERSION:-1.5.3.0}.jar"
+      - "./virtual_graph:/nvg_home:ro"
+      - "./furniture.duckdb:/duckdb-data/furniture.duckdb:ro"
+      # The views hold absolute CSV paths, so the CSVs are mounted at the same path
+      - "${FURNITURE_DATA_DIR}:${FURNITURE_DATA_DIR}:ro"

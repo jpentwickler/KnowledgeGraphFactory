@@ -1,0 +1,152 @@
+# US025 findings: zero-copy vs selective materialization
+
+**The question:** can zero-copy through Neo4j Virtual Graph replace the selective
+materialization in `docs/architecture/13_multi_source_virtualization.md` (§2.1, §5) and
+`future_ideas.md` Idea 8, and what does it cost?
+
+**Which CQ5:** the traceability question as worded in
+`docs/architecture/14_canonical_graph_schema.md` ("the complete traceability path from a
+customer complaint about product functionality to the specific supplier and part responsible").
+`state/current_state.json` approves a different CQ5: "What percentage of negative reviews for a
+product can be traced back to issues with specific suppliers?". **That version was not tested.**
+It aggregates over all negative reviews, so it depends on key resolution recall: with only 2 of
+25 extracted parts carrying a key (section 2), most reviews could not be traced to a supplier
+today, with or without virtualization.
+
+**Outcome:** zero-copy works for CQ5, but is **parked** (owner decision 2026-10-05, next section).
+
+**Status:** built and unit-tested in a cloud session, then run end to end on the owner's Mac on
+2026-10-04 (Neo4j Enterprise 2026.09.0, Virtual Graph 1.0-alpha-01, DuckDB 1.5, OrbStack).
+Section 1 records what building it established, section 2 the run, section 3 the answer.
+
+## 1. Established while building
+
+### The bridge reduces to one property
+
+With no domain nodes in Neo4j there is nothing for `CORRESPONDS_TO` to point at. The bridge
+becomes a `part_id` property on `Part:__Entity__`, and the join happens in app code: hop 1
+collects keys natively, hop 2 looks them up on the virtual side (`cq5.join_cq5`). No edge
+crosses the boundary, and no proxy node is needed.
+
+### Entity resolution: still name-based, but it has to query the source
+
+`stamp_keys.py` **still matches on part name**. What narrows "drawer rails" to `S-1085`
+rather than `S-1078` is the product, taken from the source document
+("Helsingborg Dresser Reviews") and looked up in the virtual side at build time
+(product → assemblies → parts). So the claim is not "key resolution replaces name matching".
+It is: **resolution has to query the source; it does not depend on materialized domain nodes.**
+
+- Today's `entity_resolution.py` fuzzy-matches text entities against domain **nodes**. With
+  zero-copy there are none, so it cannot run as it is.
+- The furniture data shows why product context matters: "Drawer Rails" is two parts
+  (`S-1078` in the Malmö Desk, `S-1085` in the Helsingborg Dresser) with the same two
+  suppliers. A name match alone is ambiguous, with or without fuzziness.
+- `stamp_keys.py` refuses rather than guesses: a part mentioned in reviews of more than one
+  product, or matching more than one part of its product, gets no key and is reported.
+  Near-misses ("drawer rail") are reported as unmatched, with no similarity fallback (unit-tested).
+
+### What can push down, and what must stay native
+
+| Step | Where it runs | Why |
+|---|---|---|
+| Hybrid search (vector + fulltext) over chunks | Native | Virtual Graph and Ontop do no embeddings |
+| Chunk → Defect → Part entity, `part_id`s | Native | The extracted entities exist only in Neo4j |
+| Part → `SUPPLIED_BY` → Supplier with prices | Virtual (SQL) | Keyed lookup on `part_supplier_mapping` + `suppliers` |
+| Parts-per-supplier roll-up | Virtual (SQL) | `GROUP BY` over the mapping |
+| Key stamping (product → part key) | Virtual (SQL), at build time | Replaces resolution against domain nodes |
+
+### Freshness
+
+The DuckDB file holds only views; every query re-reads the CSVs. A price edited in
+`part_supplier_mapping.csv` shows up in the next answer with no rebuild (unit-tested through
+the CQ5 join). Under selective materialization, keys, filter and sort columns and FK
+relationships live in Neo4j and need a re-import when they change. Only the virtual columns
+are fresh.
+
+### Maturity, as known before the run
+
+- Virtual Graph is in **public preview**. Self-managed needs **Neo4j Enterprise**, uses
+  `internal.*` settings, and reads its config **at boot**: a schema change means a restart,
+  and an invalid config fails the boot.
+- A single statement spanning a native and a virtual graph is roadmap, not available. So the
+  native → virtual join lives in app code, just as doc 13's enrichment router does.
+- The community playground lists open limitations: no `|` (multiple relationship types) in
+  one pattern, backend-specific SQL dialect issues, unsupported column types.
+- Doc 13's approach uses GA Neo4j plus a Python `DataSource`, with no preview features.
+
+### What doc 13 keeps that zero-copy gives up
+
+Doc 13 materializes topology (keys, filter and sort columns, FK relationships) so that
+**multi-hop structural traversal and filtering run inside Neo4j**, and only detail columns
+are fetched. With zero-copy, every structural hop on the domain side (Product → Assembly →
+Part → Supplier) becomes SQL generated by Virtual Graph. CQ5 needs only one such hop after
+the boundary. Questions that filter or traverse deep into the domain side are where latency
+and pushdown quality decide the answer, and this prototype measures only the CQ5 hop and one
+roll-up.
+
+## 2. Results from the owner's machine (2026-10-04)
+
+| Check | Result |
+|---|---|
+| Spike: Virtual Graph boots on Neo4j Enterprise with the DuckDB views (`SETUP.md`) | **Yes**, after one fix: the JDBC jar mount must be writable (the entrypoint `chown`s `lib/`). Views over CSVs, upper-case column names and the read-only DuckDB file all worked as written |
+| Spike query: S-1085 → Korean Metal Works 47.14, Shanghai Metal Corp 40.82 | **Yes**, exactly. The virtual graph takes over the default database `neo4j` |
+| Native build from an empty DB | **Yes.** Into a standard database `native` on the same instance (made default). 10/10 files, 70 chunks, 130 entities (25 `Part`, 52 `Defect`, 21 `Review`, …), both indexes `ONLINE`, 0 non-text nodes, 0 `CORRESPONDS_TO`. GPT-4o + `text-embedding-3-large`, ~54 s |
+| `stamp_keys.py` | **2 stamped, 1 ambiguous, 22 unmatched.** Both "drawer rails" entities (two casings, not merged by the builder) → **S-1085**, not S-1078. "drawer" is ambiguous (two products). The 22 unmatched are names that are not CSV part names: "Metal Rails", "Drawer Handle", "drawer slide mechanism", "Cushions", "Slats", "Instructions", … |
+| `cq5 --via virtual-graph` | **Correct.** Strict path (complaint chunk → `Defect` "Uneven Metal Edges", "Rough Sliding Mechanisms" → `Part` "drawer rails") → `['S-1085']` → Korean Metal Works $47.14 (17 d), Shanghai Metal Corp $40.82 (26 d). Hop 1 0.58 s (mostly the OpenAI embedding call), **hop 2 0.016 s**, roll-up 0.023 s |
+| `cq5 --via duckdb` | **Same answer.** Hop 1 0.52 s, hop 2 0.014 s, roll-up 0.010 s |
+| Roll-up through Virtual Graph | **Failed first:** `RETURN s.supplier_id AS supplier_id … count(DISTINCT p)` made Virtual Graph generate `GROUP BY "supplier_id"`, which DuckDB rejects as ambiguous (`Binder Error: Ambiguous reference to column name "supplier_id"`). Works when the aliases do not repeat a source column name (`AS sid`, `AS sname`); `cq5.py` now does that. A pushdown bug in the alpha |
+| Live edit | **Yes.** Korean Metal Works' S-1085 price set to $99.99 in the CSV: the spike query, `cq5 --via virtual-graph` and `cq5 --via duckdb` all returned $99.99 at once, with no restart or rebuild. CSV restored |
+| Composite single statement (`run_composite.sh`) | **Not possible.** The composite `us025` accepts `native` as a constituent, but the alias to the virtual graph is registered and unusable: `SHOW DATABASES` lists only `us025.native`, and `USE us025.domain` fails with `42N00 graph reference not found`. A virtual graph cannot be a composite constituent on this version, as Neo4j's roadmap note implies |
+| Ontop (optional) | **Works**, same answers for hop 2 and the roll-up. Generated SQL for hop 2 is correct but naive: `part_supplier_mapping` is joined twice and a `SELECT 1 … LIMIT 1` existence check is added. The roll-up SQL is a clean `GROUP BY` |
+
+## Decision (owner, 2026-10-05): zero-copy parked
+
+Virtual Graph works for CQ5 but is not mature enough to build on: a 1.0-alpha preview,
+Enterprise-only, with no native + virtual federation, schema procedures overridden for every
+database on the instance, a `GROUP BY` alias bug and no variable-length paths. The value is in the
+process (resolution, concept vocabulary, propose → approve), which does not depend on where the
+domain data lives. So:
+
+- **The native Neo4j graph stays the target** for now (full domain layer + `CORRESPONDS_TO`).
+  Doc 13 and `future_ideas.md` Idea 8 are not changed.
+- **Kept from US025:** resolution lands on the **source key** first (scoped by context, as
+  `stamp_keys.py` does), and the `CORRESPONDS_TO` edge is then created to the domain node with
+  that key. Domain access stays behind one `DataSource`-style interface. Both keep a later move
+  to zero-copy a change of storage, not a redesign.
+- **Next:** ontology-driven entity resolution (mention → SKOS concept → key) as Claude skills on
+  the native graph (vault draft "Ontology-driven entity resolution: concept → instance").
+- **Revisit** when Virtual Graph reaches GA: federation, schema procedures, the `GROUP BY` bug.
+
+## 3. Answer (as of the run, before the decision)
+
+**Yes: zero-copy through Neo4j Virtual Graph can carry CQ5-shaped questions with nothing
+structured in Neo4j**, with two qualifications. Measured against the decision rule set before
+the run: the spike booted, CQ5 through Virtual Graph returned the right rows live from the CSV,
+and hop 2 and the roll-up took milliseconds.
+
+- **The bridge works as a key, joined in app code.** A single Cypher statement across native and
+  virtual is not available (no composite constituent), so the native → virtual join stays in
+  application code, as doc 13's enrichment router does. One `part_id` property on the text side
+  is the whole bridge.
+- **The weak link is resolution, not virtualization.** CQ5 worked because "drawer rails" is the
+  CSV's part name. 22 of 25 extracted parts carry names the CSV does not use ("Metal Rails",
+  "drawer slide mechanism"), so they got no key. Exact name matching scoped by product is
+  precise (S-1085, never S-1078) but has low recall. That is independent of zero-copy versus
+  materialization: doc 13's approach would need the same resolution step.
+- **Maturity is the cost.** Virtual Graph is a 1.0-alpha preview on Enterprise only, with
+  `internal.*` settings, boot-time config, a writable-jar quirk, a `GROUP BY` alias bug, and no
+  federation. Doc 13's selective materialization runs on GA Neo4j today.
+- **Not tested here:** deep domain-side traversal (Product → Assembly → Part → Supplier with
+  filters) at scale, where doc 13 keeps traversal inside Neo4j. CQ5 needs one domain hop.
+
+**Recommendation:** zero-copy is viable as the target, kept behind the same `DataSource`/router
+seam doc 13 already has, so a selective-materialization fallback remains possible while Virtual
+Graph is in preview. Follow-ups:
+1. Update doc 13 §2.1 and `future_ideas.md` Idea 8 with zero-copy as the target, with these
+   caveats (separate story, as decided).
+2. Improve key resolution recall (synonyms or an LLM step that maps an extracted part name to a
+   part of that product, still answering with a key), measured on all 25 parts.
+3. Re-run on Virtual Graph GA, checking federation and the `GROUP BY` alias bug.
+4. Settle which wording is CQ5 (doc 14's traceability path or the state's percentage
+   question) and align the other file. The percentage version is worth running once
+   follow-up 2 raises recall.

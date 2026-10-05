@@ -1,0 +1,99 @@
+{
+  "catalog": "furniture",
+  "schema": "main",
+  "entities": {
+    "nodes": [
+      {
+        "label": "Product",
+        "table": "products",
+        "properties": [
+          {"name": "product_id",   "column": "PRODUCT_ID",   "type": "STRING"},
+          {"name": "name",         "column": "PRODUCT_NAME", "type": "STRING"},
+          {"name": "price",        "column": "PRICE",        "type": "FLOAT"},
+          {"name": "description",  "column": "DESCRIPTION",  "type": "STRING"}
+        ],
+        "key": [{"column": "PRODUCT_ID"}]
+      },
+      {
+        "label": "Assembly",
+        "table": "assemblies",
+        "properties": [
+          {"name": "assembly_id",  "column": "ASSEMBLY_ID",   "type": "STRING"},
+          {"name": "name",         "column": "ASSEMBLY_NAME", "type": "STRING"},
+          {"name": "quantity",     "column": "QUANTITY",      "type": "INTEGER"}
+        ],
+        "key": [{"column": "ASSEMBLY_ID"}]
+      },
+      {
+        "label": "Part",
+        "table": "parts",
+        "properties": [
+          {"name": "part_id",      "column": "PART_ID",   "type": "STRING"},
+          {"name": "name",         "column": "PART_NAME", "type": "STRING"},
+          {"name": "quantity",     "column": "QUANTITY",  "type": "INTEGER"}
+        ],
+        "key": [{"column": "PART_ID"}]
+      },
+      {
+        "label": "Supplier",
+        "table": "suppliers",
+        "properties": [
+          {"name": "supplier_id",  "column": "SUPPLIER_ID", "type": "STRING"},
+          {"name": "name",         "column": "NAME",        "type": "STRING"},
+          {"name": "specialty",    "column": "SPECIALTY",   "type": "STRING"},
+          {"name": "city",         "column": "CITY",        "type": "STRING"},
+          {"name": "country",      "column": "COUNTRY",     "type": "STRING"}
+        ],
+        "key": [{"column": "SUPPLIER_ID"}]
+      }
+    ],
+    "relationships": [
+      {
+        "label": "HAS_ASSEMBLY",
+        "table": "assemblies",
+        "start": {
+          "targetEntity": "Product",
+          "keys": [{"nodeColumn": "PRODUCT_ID", "relationshipColumn": "PRODUCT_ID"}]
+        },
+        "end": {
+          "targetEntity": "Assembly",
+          "keys": [{"nodeColumn": "ASSEMBLY_ID", "relationshipColumn": "ASSEMBLY_ID"}]
+        },
+        "properties": [],
+        "key": [{"column": "ASSEMBLY_ID"}]
+      },
+      {
+        "label": "HAS_PART",
+        "table": "parts",
+        "start": {
+          "targetEntity": "Assembly",
+          "keys": [{"nodeColumn": "ASSEMBLY_ID", "relationshipColumn": "ASSEMBLY_ID"}]
+        },
+        "end": {
+          "targetEntity": "Part",
+          "keys": [{"nodeColumn": "PART_ID", "relationshipColumn": "PART_ID"}]
+        },
+        "properties": [],
+        "key": [{"column": "PART_ID"}]
+      },
+      {
+        "label": "SUPPLIED_BY",
+        "table": "part_supplier_mapping",
+        "start": {
+          "targetEntity": "Part",
+          "keys": [{"nodeColumn": "PART_ID", "relationshipColumn": "PART_ID"}]
+        },
+        "end": {
+          "targetEntity": "Supplier",
+          "keys": [{"nodeColumn": "SUPPLIER_ID", "relationshipColumn": "SUPPLIER_ID"}]
+        },
+        "properties": [
+          {"name": "unit_cost",          "column": "UNIT_COST",          "type": "FLOAT"},
+          {"name": "lead_time_days",     "column": "LEAD_TIME_DAYS",     "type": "INTEGER"},
+          {"name": "preferred_supplier", "column": "PREFERRED_SUPPLIER", "type": "STRING"}
+        ],
+        "key": [{"column": "PART_ID"}, {"column": "SUPPLIER_ID"}]
+      }
+    ]
+  }
+}

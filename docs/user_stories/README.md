@@ -125,3 +125,4 @@ All user stories must meet these criteria before being considered complete:
 | [US022](US022_plugin_distribution.md) | Plug-and-Play Plugin Distribution | 3 | DONE |
 | [US023](US023_canonical_graph_schema.md) | Canonical Graph Schema | 8 | DONE |
 | [US024](US024_openclaw_integration.md) | OpenClaw Cloud Integration | 3 | DONE |
+| [US025](US025_virtualized_domain_layer_prototype.md) | Virtualized Domain Layer Prototype | 5 | DONE |

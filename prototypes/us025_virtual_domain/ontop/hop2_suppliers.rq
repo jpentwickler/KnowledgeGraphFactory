@@ -1,0 +1,9 @@
+# CQ5 hop 2 via Ontop: suppliers and prices for the part keys from hop 1.
+PREFIX : <http://example.org/us025/furniture#>
+SELECT ?partId ?partName ?supplierName ?unitCost ?leadTimeDays WHERE {
+  VALUES ?partId { "S-1085" }
+  ?part :partId ?partId ; :name ?partName .
+  ?supply :ofPart ?part ; :bySupplier ?supplier ; :unitCost ?unitCost ; :leadTimeDays ?leadTimeDays .
+  ?supplier :name ?supplierName .
+}
+ORDER BY ?partId ?supplierName
