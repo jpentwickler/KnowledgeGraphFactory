@@ -139,6 +139,9 @@ and hop 2 and the roll-up took milliseconds.
 - **Not tested here:** deep domain-side traversal (Product → Assembly → Part → Supplier with
   filters) at scale, where doc 13 keeps traversal inside Neo4j. CQ5 needs one domain hop.
 
+*Superseded by the owner's decision above: zero-copy is parked, doc 13 and Idea 8 stay as they
+are. The recommendation and follow-ups below are kept as written at the run.*
+
 **Recommendation:** zero-copy is viable as the target, kept behind the same `DataSource`/router
 seam doc 13 already has, so a selective-materialization fallback remains possible while Virtual
 Graph is in preview. Follow-ups:

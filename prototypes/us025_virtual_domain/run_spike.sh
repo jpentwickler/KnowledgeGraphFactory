@@ -3,7 +3,9 @@
 # furniture DuckDB views, then run spike.cypher against every user database.
 #
 # Usage (from anywhere):  prototypes/us025_virtual_domain/run_spike.sh
-# Stop:                   docker compose -f prototypes/us025_virtual_domain/docker-compose.yml down
+# Stop:                   FURNITURE_DATA_DIR="$PWD/examples/furniture_supply_chain/data" \
+#                           docker compose -f prototypes/us025_virtual_domain/docker-compose.yml down -v
+#                         (from the repo root; compose needs FURNITURE_DATA_DIR even to stop)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

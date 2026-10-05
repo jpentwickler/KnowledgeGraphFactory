@@ -56,10 +56,11 @@ All commands run from the repo root.
 ```bash
 PY=prototypes/us025_virtual_domain/py.sh
 
-# 1. Spike: Neo4j Enterprise + Virtual Graph over the DuckDB views. Note the VG database name.
+# 1. Spike: Neo4j Enterprise + Virtual Graph over the DuckDB views. The virtual graph takes the
+#    default database `neo4j`; run_spike.sh creates `native` for the text graph and makes it default.
 prototypes/us025_virtual_domain/run_spike.sh
 export NEO4J_URI=bolt://localhost:7687 NEO4J_USER=neo4j NEO4J_PASSWORD=us025password
-export VG_DATABASE=<name printed by run_spike.sh>
+export VG_DATABASE=neo4j NEO4J_DATABASE=native
 
 # 2. Native text side, from an empty database
 $PY -m prototypes.us025_virtual_domain.prepare_state

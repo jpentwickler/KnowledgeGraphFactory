@@ -40,6 +40,10 @@ transparently.
 
 ### 2.1 Neo4j as Topology Wrapper
 
+> **See also US025** (`prototypes/us025_virtual_domain/FINDINGS.md`): zero-copy through Neo4j
+> Virtual Graph (nothing materialized, bridge by key) was tested on 2026-10-04 and works for CQ5,
+> but is **parked** while Virtual Graph is an immature preview. This section stays the design.
+
 Every table in the source databases becomes a node label in Neo4j. Every foreign
 key becomes a relationship. Each node materializes only:
 

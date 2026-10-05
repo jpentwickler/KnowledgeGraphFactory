@@ -837,6 +837,10 @@ with Python dicts, regardless of where they came from.
 
 #### Part B: Selective Materialization
 
+> **See also US025** (`prototypes/us025_virtual_domain/FINDINGS.md`): the zero-copy alternative
+> (Neo4j Virtual Graph over the source, nothing materialized) was prototyped on 2026-10-04 and
+> parked. Its lesson for this idea: resolution should land on the source key first.
+
 Not all Databricks data needs to be copied into Neo4j. **Materialize graph
 topology (node IDs + relationships + match keys), leave detail properties
 in Databricks, fetch on-demand at query time.**

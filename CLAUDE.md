@@ -304,8 +304,10 @@ MATCH (n) DETACH DELETE n
 ## Next Steps for Claude Code
 
 The original build order (core framework → one agent per stage) is complete: US001–US024 are
-`DONE` except US016 (see the Story Index in `docs/user_stories/README.md`). New work starts from a
-story, as the **Workflow** section above describes.
+`DONE` except US016 (see the Story Index in `docs/user_stories/README.md`). US025 (zero-copy domain
+layer prototype) is `DONE`: zero-copy is parked and the native graph stays the target
+(`prototypes/us025_virtual_domain/FINDINGS.md`, "Decision"). New work starts from a story, as the
+**Workflow** section above describes.
 
 Agent specs live in `docs/architecture/` (`00_architecture.md`, `01_user_intent.md` …
 `15_adaptive_retrieval_architecture.md`). Read the one for an agent before changing it.

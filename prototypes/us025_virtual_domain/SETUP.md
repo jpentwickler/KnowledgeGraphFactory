@@ -64,6 +64,15 @@ Result: `native` standard, default · `neo4j` virtual graph · the spike query s
 `neo4j`. So `VG_DATABASE=neo4j`, and `NEO4J_DATABASE=native` for `run_composite.sh`. These
 databases live in the container: `docker compose down` deletes them.
 
+**Caveat found after the run (2026-10-05):** with Virtual Graph enabled, the schema procedures
+answer for the virtual graph on **every** database of the instance. On `native`, `db.labels()`,
+`db.relationshipTypes()` and `db.schema.*` return `Product, Assembly, Part, Supplier` /
+`HAS_ASSEMBLY, HAS_PART, SUPPLIED_BY` instead of the text graph's labels. Queries return the right
+data, and the project's own schema introspection (`MATCH`-based) recorded the right text schema,
+but Neo4j Browser's sidebar and Explore show the wrong schema on `native`. Not documented by Neo4j;
+probably a preview bug. Workaround: a separate plain Neo4j instance for the text graph (`cq5.py`
+already takes `VG_URI`). The virtual graph also rejects variable-length patterns (`[*1..3]`).
+
 ## Known risks to check first if it fails
 
 - **Views vs tables.** The playground materializes DuckDB **tables** "so JDBC reads need no
