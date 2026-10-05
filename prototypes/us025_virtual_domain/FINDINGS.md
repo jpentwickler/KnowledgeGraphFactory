@@ -13,6 +13,8 @@ It aggregates over all negative reviews, so it depends on key resolution recall:
 25 extracted parts carrying a key (section 2), most reviews could not be traced to a supplier
 today, with or without virtualization.
 
+**Outcome:** zero-copy works for CQ5, but is **parked** (owner decision 2026-10-05, next section).
+
 **Status:** built and unit-tested in a cloud session, then run end to end on the owner's Mac on
 2026-10-04 (Neo4j Enterprise 2026.09.0, Virtual Graph 1.0-alpha-01, DuckDB 1.5, OrbStack).
 Section 1 records what building it established, section 2 the run, section 3 the answer.
@@ -97,7 +99,25 @@ roll-up.
 | Composite single statement (`run_composite.sh`) | **Not possible.** The composite `us025` accepts `native` as a constituent, but the alias to the virtual graph is registered and unusable: `SHOW DATABASES` lists only `us025.native`, and `USE us025.domain` fails with `42N00 graph reference not found`. A virtual graph cannot be a composite constituent on this version, as Neo4j's roadmap note implies |
 | Ontop (optional) | **Works**, same answers for hop 2 and the roll-up. Generated SQL for hop 2 is correct but naive: `part_supplier_mapping` is joined twice and a `SELECT 1 … LIMIT 1` existence check is added. The roll-up SQL is a clean `GROUP BY` |
 
-## 3. Answer
+## Decision (owner, 2026-10-05): zero-copy parked
+
+Virtual Graph works for CQ5 but is not mature enough to build on: a 1.0-alpha preview,
+Enterprise-only, with no native + virtual federation, schema procedures overridden for every
+database on the instance, a `GROUP BY` alias bug and no variable-length paths. The value is in the
+process (resolution, concept vocabulary, propose → approve), which does not depend on where the
+domain data lives. So:
+
+- **The native Neo4j graph stays the target** for now (full domain layer + `CORRESPONDS_TO`).
+  Doc 13 and `future_ideas.md` Idea 8 are not changed.
+- **Kept from US025:** resolution lands on the **source key** first (scoped by context, as
+  `stamp_keys.py` does), and the `CORRESPONDS_TO` edge is then created to the domain node with
+  that key. Domain access stays behind one `DataSource`-style interface. Both keep a later move
+  to zero-copy a change of storage, not a redesign.
+- **Next:** ontology-driven entity resolution (mention → SKOS concept → key) as Claude skills on
+  the native graph (vault draft "Ontology-driven entity resolution: concept → instance").
+- **Revisit** when Virtual Graph reaches GA: federation, schema procedures, the `GROUP BY` bug.
+
+## 3. Answer (as of the run, before the decision)
 
 **Yes: zero-copy through Neo4j Virtual Graph can carry CQ5-shaped questions with nothing
 structured in Neo4j**, with two qualifications. Measured against the decision rule set before

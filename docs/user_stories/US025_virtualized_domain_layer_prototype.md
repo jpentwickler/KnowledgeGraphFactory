@@ -22,7 +22,7 @@ compared with selective materialization
 The risk is in Neo4j Virtual Graph (public preview, Enterprise-only when self-managed) and in
 Ontop against DuckDB, neither of which the repo has used.
 
-## Status: approved — hub review done (2 rounds), all checks run on the owner's Mac on 2026-10-04: spike, native build, key stamping, CQ5 via Virtual Graph and DuckDB, live edit, composite attempt (not possible on this version), Ontop. Answer in `prototypes/us025_virtual_domain/FINDINGS.md`: zero-copy works for CQ5; resolution recall and Virtual Graph maturity are the costs. Merge on the owner's word
+## Status: DONE — merged 2026-10-05 after hub review (2 rounds) and the run on the owner's Mac (2026-10-04). Zero-copy works for CQ5 but is parked: Virtual Graph is an immature preview. The native graph stays the target; resolution should land on source keys. Decision and findings in `prototypes/us025_virtual_domain/FINDINGS.md`
 
 ## Context
 
@@ -165,6 +165,9 @@ and prototype requirements:
    the zero-copy answer against doc 13.
 
 ## Notes
+
+- **Decision (owner, 2026-10-05):** zero-copy parked until Virtual Graph matures; the native
+  graph stays the target; resolution lands on source keys first. See `FINDINGS.md`, "Decision".
 
 - "Drawer Rails" is two parts in the CSV, `S-1078` and `S-1085`, and both are supplied by
   the same two suppliers. A fuzzy name match on "drawer rails" cannot tell them apart, which is
