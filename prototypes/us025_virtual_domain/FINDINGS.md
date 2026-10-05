@@ -4,6 +4,15 @@
 materialization in `docs/architecture/13_multi_source_virtualization.md` (§2.1, §5) and
 `future_ideas.md` Idea 8, and what does it cost?
 
+**Which CQ5:** the traceability question as worded in
+`docs/architecture/14_canonical_graph_schema.md` ("the complete traceability path from a
+customer complaint about product functionality to the specific supplier and part responsible").
+`state/current_state.json` approves a different CQ5: "What percentage of negative reviews for a
+product can be traced back to issues with specific suppliers?". **That version was not tested.**
+It aggregates over all negative reviews, so it depends on key resolution recall: with only 2 of
+25 extracted parts carrying a key (section 2), most reviews could not be traced to a supplier
+today, with or without virtualization.
+
 **Status:** built and unit-tested in a cloud session, then run end to end on the owner's Mac on
 2026-10-04 (Neo4j Enterprise 2026.09.0, Virtual Graph 1.0-alpha-01, DuckDB 1.5, OrbStack).
 Section 1 records what building it established, section 2 the run, section 3 the answer.
@@ -118,3 +127,6 @@ Graph is in preview. Follow-ups:
 2. Improve key resolution recall (synonyms or an LLM step that maps an extracted part name to a
    part of that product, still answering with a key), measured on all 25 parts.
 3. Re-run on Virtual Graph GA, checking federation and the `GROUP BY` alias bug.
+4. Settle which wording is CQ5 (doc 14's traceability path or the state's percentage
+   question) and align the other file. The percentage version is worth running once
+   follow-up 2 raises recall.

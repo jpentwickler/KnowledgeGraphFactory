@@ -11,7 +11,7 @@ Drafted by voice: vault note `projects/Ontology Pipeline/drafts/story-virtualize
 ## User Story
 
 **As a** KG-Factory Developer
-**I want** to run the furniture traceability question (CQ5) against a graph whose domain layer
+**I want** to run the furniture traceability question (CQ5 as worded in doc 14) against a graph whose domain layer
 stays in the CSVs and is reached through Neo4j Virtual Graph over DuckDB
 **So that** I know whether the `CORRESPONDS_TO` bridge, and the entity resolution that writes it,
 survive a move to a virtualized (Databricks-style) domain layer, and what zero-copy costs
@@ -93,6 +93,12 @@ References: [enabling Virtual Graph](https://neo4j.com/docs/virtual-graph/self-m
 
 ### CQ5 traceability, end to end
 
+*CQ5 here is the wording in `docs/architecture/14_canonical_graph_schema.md`: "the complete
+traceability path from a customer complaint about product functionality to the specific supplier
+and part responsible". The approved list in `state/current_state.json` words CQ5 differently
+("What percentage of negative reviews for a product can be traced back to issues with specific
+suppliers?"). That version was not tested; see `FINDINGS.md`.*
+
 - [x] ⚑ CQ5 runs as two Cypher queries joined in app code: native Neo4j (hybrid search →
   chunk → defect → part entity → `part_id`s), then the virtual graph (parts → suppliers with
   prices)
@@ -171,6 +177,10 @@ and prototype requirements:
   run is recorded in the repo (`examples/furniture_supply_chain/eval/results/` holds only
   extraction metrics); CQ5 is listed as approved in
   `docs/architecture/14_canonical_graph_schema.md`. Not blocking for this story.
+- **Two CQ5s (found in review, 2026-10-05).** Doc 14 and `state/current_state.json`
+  (`approved_competency_questions`) disagree on CQ5: traceability path vs percentage of negative
+  reviews traceable to suppliers. This story uses doc 14's. Which wording is the real CQ5 is a
+  separate fix to the source of truth.
 
 ## Plan
 
