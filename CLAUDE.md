@@ -13,8 +13,8 @@ Uses pure Python + Claude API (Anthropic SDK). No frameworks like LangChain or G
 
 ## Workflow
 
-Voice saves story drafts, cloud **workers** build one story each on its own branch and PR, and
-the **hub** (Claude Code on the owner's machine, where `CLAUDE_CODE_REMOTE` is unset) reviews
+Voice saves story drafts, **workers** build one story each on its own branch and PR, and
+the **hub** (Claude Code on the owner's machine, started with `hub`) reviews
 through PR review comments, merges, runs the Neo4j/Docker checks and closes. The roles, stages and
 phrases are in `WORKFLOW.md` in `jpentwickler/claude-skills`, not here. What the shared skills read
 from this project:
@@ -22,8 +22,14 @@ from this project:
 | | |
 |---|---|
 | Stories | `docs/user_stories/USNNN_*.md` (from US025 on, branch `us-0nn-short-slug`, PR `US-0NN: <title>`). The `## Status:` line starts with a stage word (`docs/user_stories/README.md`) |
+| Lanes | A `## Lane:` line in each story, `close` (the default) or `fast`, Pablo's word, story by story. The rules: "Two lanes" in `WORKFLOW.md` |
 | Health command | `uv run --no-project --python 3.13 --with-requirements requirements.txt python -m pytest tests/unit -q` (no Neo4j or API keys needed). The repo has no `pyproject.toml`, so Python always runs through `uv` like this |
 | Vault | Yes. The vault project is **Ontology Pipeline** (`repo: KnowledgeGraphFactory`). Drafts are notes tagged `story-draft` with `project: '[[KnowledgeGraphFactory]]'`, under `projects/Ontology Pipeline/drafts/`, found with `search_notes("story-draft")` |
+| Local workers | Yes: the workers' clone `/Users/worker/Projects/KnowledgeGraphFactory`, default branch `master` |
+| Deploy paths | none |
+| Bar | none |
+| Deploy | none |
+| Test commands | none |
 
 ## Integration Approach
 
